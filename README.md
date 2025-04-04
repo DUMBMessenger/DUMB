@@ -9,7 +9,7 @@ You need gcc before complie!
 
 1. copy git
    ```
-   git clone github.com/debianrose/dumb.git ＆＆ cd dumb
+   git clone github.com/debianrose/dumb.git ＆＆ cd DUMB
    ```
 2. edit every what you need and.. complie!
    ```
