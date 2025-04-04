@@ -5,7 +5,7 @@
 Just install from [releases](github.com/debianrose/dumb/release) or complie! (every is alredy complied. just install and setup!)
 
 # How complie? (Linux)
-You need gcc before complie!
+You need g++ before complie!
 
 1. copy git
    ```
