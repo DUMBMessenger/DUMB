@@ -22,7 +22,9 @@ jobs:
     - name: make client
       run: clang++ client.cpp -o client -pthread -latomic
     - name: Create a Release in a GitHub Action
+      id: create_release
       uses: comnoco/create-release-action@v2.0.5:
+      env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         tag_name: ${{ github.ref }}
