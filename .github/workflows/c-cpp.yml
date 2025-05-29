@@ -27,7 +27,13 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        tag_name: ${{ github.ref }}
-        release_name: Release ${{ github.ref }}
-        draft: true
+        tag_name: 0.1
+        release_name: Hello World! v0.1
+        draft: false
+    - name: Uploading...
+      uses: softprops/action-gh-release@v2.2.2
+      run zip -r v0.1.zip server.cpp client.cpp
+      if: github.ref_type == '0.1'
+      with:
+        files: v0.1.zip   
       
