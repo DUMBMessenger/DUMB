@@ -3,6 +3,8 @@ name: Complie
 on:
   push:
     branches: [ "main" ]
+    tags:
+      - 'test'
   pull_request:
     branches: [ "main" ]
 
@@ -14,8 +16,18 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: configure
-      run: sudo apt install clang -y
+      run: sudo apt install clang zip -y
     - name: make server
       run: clang++ server.cpp -o client -pthread -latomic
     - name: make client
       run: clang++ client.cpp -o client -pthread -latomic
+    - name: creating release
+      id: create_release
+      uses: comnoco/create-release@v2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: Release ${{ github.ref }}
+        draft: true
+      
