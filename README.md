@@ -7,11 +7,11 @@ Just install from [releases](github.com/debianrose/dumb/release) or complie! (ev
 # How complie? (Linux)
 You need g++ before complie!
 
-1. copy git
+1. copy with git
    ```
    git clone github.com/debianrose/dumb.git ＆＆ cd DUMB
    ```
 2. edit every what you need and.. complie!
    ```
-   ./complie
+   clang++ client.cpp -o client -pthread -latomic
    ```
