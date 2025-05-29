@@ -16,7 +16,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: configure
-      run: sudo apt install clang zip -y
+      run: sudo apt install clang -y
     - name: make server
       run: clang++ server.cpp -o client -pthread -latomic
     - name: make client
@@ -24,6 +24,7 @@ jobs:
     - name: Create a Release in a GitHub Action
       id: create_release
       uses: comnoco/create-release-action@v2.0.5
+      run: zip -r test.zip server client
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
