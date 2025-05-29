@@ -1,0 +1,21 @@
+name: Complie
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: configure
+      run: ./configure
+    - name: make server
+      run: clang++ server.cpp -o client -pthread -latomic
+    - name: make client
+      run: clang++ client.cpp -o client -pthread -latomic
