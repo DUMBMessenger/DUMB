@@ -14,7 +14,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: configure
-      run: ./configure
+      run: apt update && apt install clang
     - name: make server
       run: clang++ server.cpp -o client -pthread -latomic
     - name: make client
