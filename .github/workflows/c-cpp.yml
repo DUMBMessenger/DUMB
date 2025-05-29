@@ -17,10 +17,12 @@ jobs:
     - uses: actions/checkout@v4
     - name: configure
       run: sudo apt install clang -y
-    - name: make server
+    - name: make server (4 test)
       run: clang++ server.cpp -o client -pthread -latomic
-    - name: make client
+    - name: make client (4 test)
       run: clang++ client.cpp -o client -pthread -latomic
+    - name: creating zip
+      run: zip -r v0.1.zip server.cpp client.cpp
     - name: Create a Release in a GitHub Action
       id: create_release
       uses: comnoco/create-release-action@v2.0.5
@@ -32,7 +34,6 @@ jobs:
         draft: false
     - name: Uploading...
       uses: softprops/action-gh-release@v2.2.2
-      run: zip -r v0.1.zip server.cpp client.cpp
       if: github.ref_type == '0.1'
       with:
         files: v0.1.zip   
