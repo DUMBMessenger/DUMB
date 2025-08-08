@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DUMBr</title>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Segoe+UI">
+    <link rel="stylesheet" href="/static/css/styles.css">
+    <style>
+        .title-bar-content {
+            display: flex;
+            align-items: center;
+            width: 100%;
+            padding: 0 10px;
+        }
+        .app-logo {
+            height: 24px;
+            margin-right: 10px;
+        }
+        .app-title {
+            flex-grow: 1;
+            text-align: center;
+        }
+        .profile-button-container {
+            margin-left: auto;
+        }
+        .user-menu {
+            position: fixed;
+            background: var(--vista-dark-glass);
+            border-radius: 6px;
+            padding: 15px;
+            box-shadow: 0 0 15px rgba(0, 0, 0, 0.5);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(8px);
+            z-index: 1000;
+            display: none;
+        }
+        .user-menu-avatar {
+            text-align: center;
+            margin-bottom: 15px;
+        }
+        .user-menu-avatar img {
+            width: 80px;
+            height: 80px;
+            border-radius: 50%;
+            border: 3px solid #4d9eff;
+        }
+        .user-menu-username {
+            text-align: center;
+            font-weight: bold;
+            margin-bottom: 15px;
+            color: #4d9eff;
+        }
+        .user-menu-buttons {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+    </style>
+</head>
+<body class="vista-dark">
+    <div class="window chat-window">
+        <div class="title-bar">
+            <div class="title-bar-content">
+                <img src="/static/images/logo.png" alt="Logo" class="app-logo">
+                <div class="app-title">DUMB</div>
+                <div class="profile-button-container">
+                    <button id="profile-button" class="profile-button">
+                        <img id="user-avatar" src="https://i.imgur.com/JJZJZJz.jpg" alt="Profile">
+                    </button>
+                </div>
+            </div>
+        </div>
+        
+        <div class="window-body">
+            <div class="chat-container">
+                <div id="reply-preview" class="reply-preview" style="display: none;">
+                    <div class="reply-content">
+                        <span class="reply-username"></span>
+                        <span class="reply-text"></span>
+                    </div>
+                    <button id="cancel-reply" class="cancel-reply">×</button>
+                </div>
+                
+                <div class="message-list" id="messages-container"></div>
+                
+                <div class="message-input-panel">
+                    <input type="text" id="message-input" class="message-input" placeholder="Введите сообщение..." autocomplete="off">
+                    <button id="send-button" class="send-button">Отправить</button>
+                </div>
+                
+                <div class="status-bar">
+                    <span id="connection-status">Подключено</span>
+                    <button id="logout-button" class="logout-button">Выйти</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="user-menu" class="user-menu">
+        <div class="user-menu-avatar">
+            <img id="menu-avatar" src="https://i.imgur.com/JJZJZJz.jpg" alt="Аватар">
+            <input type="file" id="avatar-upload" accept="image/*" style="display: none;">
+        </div>
+        <div class="user-menu-username" id="menu-username"></div>
+        <div class="user-menu-buttons">
+            <button class="form-button" onclick="document.getElementById('avatar-upload').click()">Сменить аватар</button>
+            <button class="form-button" onclick="logout()">Выйти из аккаунта</button>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <script src="/static/js/chat.js"></script>
+</body>
+</html>
