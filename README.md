@@ -1,9 +1,8 @@
-# DUMB 1.1 - More Retro with bugfixes!!
+# DUMB - Debianrose's ultimate messenger base
 
-What Changed:
-1. Web client now as New Style
-2. Fixed pfp issues
-3. Fixed Web client Bugs
+- simple installation
+- open source
+- Light weight
 
-## Our Socials:
-- https://t.me/+QsD-4CWF1Q82NTBi Telegram Chat
+# Our Socials
+https://t.me/+QsD-4CWF1Q82NTBi - telegram chat
