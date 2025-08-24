@@ -2,7 +2,7 @@ name: Publish to npm
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main ]
   workflow_dispatch:
   release:
     types: [published]
