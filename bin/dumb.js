@@ -7,7 +7,7 @@ import inquirer from "inquirer";
 import gradient from "gradient-string";
 
 async function runInstaller() {
-  console.log(gradient("sliver", "magenta").multiline([
+  console.log(gradient("white", "magenta").multiline([
     "   DUMB Installer"
   ]));
 
@@ -70,7 +70,7 @@ async function runInstaller() {
   }
 
   try {
-    console.log("\n📥 Downloading templates from GitHub...");
+    console.log("\n📥 Downloading from GitHub...");
     execSync("git clone https://github.com/debianrose/dumb.git temp_repo", { stdio: "inherit" });
     
     if (!fs.existsSync("temp_repo/templates")) {
@@ -78,16 +78,38 @@ async function runInstaller() {
       process.exit(1);
     }
 
+    console.log("📁 Creating project structure...");
     fs.mkdirSync(projectPath, { recursive: true });
+    fs.mkdirSync(path.join(projectPath, "storage", "slaves"), { recursive: true });
+
+    console.log("📋 Copying template files...");
     
-    console.log("📁 Copying template files...");
-    const templatesDir = "temp_repo/templates";
-    const files = fs.readdirSync(templatesDir);
-    
-    files.forEach(file => {
-      if (file !== "config.js") {
-        const src = path.join(templatesDir, file);
-        const dest = path.join(projectPath, file);
+    // Copy main server files
+    const mainFiles = ["server.js"];
+    mainFiles.forEach(file => {
+      const src = path.join("temp_repo/templates", file);
+      const dest = path.join(projectPath, file);
+      if (fs.existsSync(src)) {
+        fs.copyFileSync(src, dest);
+      }
+    });
+
+    // Copy storage files
+    const storageFiles = ["storage.js"];
+    storageFiles.forEach(file => {
+      const src = path.join("temp_repo/templates/storage", file);
+      const dest = path.join(projectPath, "storage", file);
+      if (fs.existsSync(src)) {
+        fs.copyFileSync(src, dest);
+      }
+    });
+
+    // Copy slave files
+    const slaveFiles = ["json.js", "sqls.js"];
+    slaveFiles.forEach(file => {
+      const src = path.join("temp_repo/templates/storage/slaves", file);
+      const dest = path.join(projectPath, "storage/slaves", file);
+      if (fs.existsSync(src)) {
         fs.copyFileSync(src, dest);
       }
     });
@@ -161,7 +183,7 @@ async function runInstaller() {
     console.log("🧹 Cleaning up...");
     execSync("rm -rf temp_repo", { stdio: "inherit" });
 
-    console.log(gradient("green", "blue").multiline([
+    console.log(gradient("magneta", "white").multiline([
       "\n✅ Installation complete!",
       "──────────────────────────────",
       `📁 Folder: ${answers.folder}`,
