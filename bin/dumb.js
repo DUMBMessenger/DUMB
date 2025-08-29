@@ -7,8 +7,8 @@ import inquirer from "inquirer";
 import gradient from "gradient-string";
 
 async function runInstaller() {
-  console.log(gradient("white", "magenta").multiline([
-    "   DUMB Installer"
+  console.log(gradient("cyan", "magenta").multiline([
+    "   DUMB Messenger Installer"
   ]));
 
   const answers = await inquirer.prompt([
@@ -38,7 +38,7 @@ async function runInstaller() {
       name: "voip",
       message: "Enable VoIP (WebRTC signaling):",
       choices: ["enable", "disable"],
-      default: "disable"
+      default: "enable"
     },
     {
       type: "list",
@@ -70,49 +70,32 @@ async function runInstaller() {
   }
 
   try {
-    console.log("\n📥 Downloading from GitHub...");
-    execSync("git clone https://github.com/debianrose/dumb.git temp_repo", { stdio: "inherit" });
+    console.log("\n📥 Downloading files from GitHub...");
     
-    if (!fs.existsSync("temp_repo/templates")) {
-      console.log("❌ Templates folder not found in repository");
-      process.exit(1);
-    }
+    const files = [
+      'server.js',
+      'storage/storage.js', 
+      'storage/slaves/json.js',
+      'storage/slaves/sqls.js'
+    ];
 
     console.log("📁 Creating project structure...");
     fs.mkdirSync(projectPath, { recursive: true });
     fs.mkdirSync(path.join(projectPath, "storage", "slaves"), { recursive: true });
 
-    console.log("📋 Copying template files...");
+    console.log("📋 Downloading individual files...");
     
-    // Copy main server files
-    const mainFiles = ["server.js"];
-    mainFiles.forEach(file => {
-      const src = path.join("temp_repo/templates", file);
+    for (const file of files) {
+      const url = `https://raw.githubusercontent.com/debianrose/dumb/main/${file}`;
       const dest = path.join(projectPath, file);
-      if (fs.existsSync(src)) {
-        fs.copyFileSync(src, dest);
+      
+      try {
+        execSync(`curl -s -o "${dest}" "${url}"`, { stdio: 'inherit' });
+        console.log(`✅ Downloaded: ${file}`);
+      } catch (error) {
+        console.log(`⚠️  Failed to download: ${file}`);
       }
-    });
-
-    // Copy storage files
-    const storageFiles = ["storage.js"];
-    storageFiles.forEach(file => {
-      const src = path.join("temp_repo/templates/storage", file);
-      const dest = path.join(projectPath, "storage", file);
-      if (fs.existsSync(src)) {
-        fs.copyFileSync(src, dest);
-      }
-    });
-
-    // Copy slave files
-    const slaveFiles = ["json.js", "sqls.js"];
-    slaveFiles.forEach(file => {
-      const src = path.join("temp_repo/templates/storage/slaves", file);
-      const dest = path.join(projectPath, "storage/slaves", file);
-      if (fs.existsSync(src)) {
-        fs.copyFileSync(src, dest);
-      }
-    });
+    }
 
     console.log("⚙️  Creating configuration...");
     const configContent = `export default {
@@ -180,10 +163,7 @@ async function runInstaller() {
 
     execSync("npm install", { cwd: projectPath, stdio: "inherit" });
 
-    console.log("🧹 Cleaning up...");
-    execSync("rm -rf temp_repo", { stdio: "inherit" });
-
-    console.log(gradient("magneta", "white").multiline([
+    console.log(gradient("magneta", "cyan").multiline([
       "\n✅ Installation complete!",
       "──────────────────────────────",
       `📁 Folder: ${answers.folder}`,
@@ -202,7 +182,6 @@ async function runInstaller() {
 
   } catch (err) {
     console.error("❌ Installation failed:", err);
-    try { execSync("rm -rf temp_repo"); } catch {}
     process.exit(1);
   }
 }

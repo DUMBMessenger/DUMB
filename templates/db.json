@@ -1,0 +1,68 @@
+{
+  "users": [
+    {
+      "username": "admin",
+      "passwordHash": "7eac240dfdc007c47136f6ec9ef69899d2ebdfbfdf9214649772bea591674f77",
+      "salt": "0ab7147ed0d29596e11aa7ccf8f0a3f5",
+      "avatar": null
+    }
+  ],
+  "messages": [
+    {
+      "from": "admin",
+      "channel": "general",
+      "text": "Hello",
+      "ts": 1756447059235,
+      "replyTo": null,
+      "id": "0fbbbb1a40caaf505ba117aa0aea97c8"
+    },
+    {
+      "from": "admin",
+      "channel": "general",
+      "text": "hello?",
+      "ts": 1756447843020,
+      "replyTo": null,
+      "id": "c975e60eaeace2858e6b6d570a3a2be6"
+    },
+    {
+      "from": "admin",
+      "channel": "general",
+      "text": "YAY",
+      "ts": 1756450852456,
+      "replyTo": null,
+      "id": "7f399bedddd2850aeb5e3a28f1714c35"
+    },
+    {
+      "from": "admin",
+      "channel": "general",
+      "text": "IT WORK!!!",
+      "ts": 1756450857056,
+      "replyTo": null,
+      "id": "9d2817a2f421e3bdc472195fa4067459"
+    }
+  ],
+  "tokens": [
+    {
+      "username": "admin",
+      "token": "fe180ef89019c7f0cabc117cb17e4d9e770e08063d9bf75525a2ae5e81b3923d",
+      "expiry": 1756537247210
+    }
+  ],
+  "channels": [
+    {
+      "name": "general",
+      "createdBy": "admin",
+      "createdAt": 1756447055583
+    }
+  ],
+  "channelMembers": [
+    {
+      "channel": "general",
+      "username": "admin",
+      "joinedAt": 1756447055583
+    }
+  ],
+  "webrtcOffers": [],
+  "webrtcAnswers": [],
+  "iceCandidates": []
+}
