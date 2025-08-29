@@ -70,31 +70,44 @@ async function runInstaller() {
   }
 
   try {
-    console.log("\n📥 Downloading files from GitHub...");
+    console.log("\n📥 Cloning repository from GitHub...");
+    execSync("git clone https://github.com/debianrose/dumb.git temp_repo", { stdio: "inherit" });
     
-    const files = [
-      'server.js',
-      'storage/storage.js', 
-      'storage/slaves/json.js',
-      'storage/slaves/sqls.js'
-    ];
+    const templatesPath = "temp_repo/templates";
+    if (!fs.existsSync(templatesPath)) {
+      console.log("❌ Templates folder not found in repository");
+      process.exit(1);
+    }
 
     console.log("📁 Creating project structure...");
     fs.mkdirSync(projectPath, { recursive: true });
     fs.mkdirSync(path.join(projectPath, "storage", "slaves"), { recursive: true });
 
-    console.log("📋 Downloading individual files...");
+    console.log("📋 Copying template files...");
     
-    for (const file of files) {
-      const url = `https://raw.githubusercontent.com/debianrose/dumb/main/${file}`;
-      const dest = path.join(projectPath, file);
-      
-      try {
-        execSync(`curl -s -o "${dest}" "${url}"`, { stdio: 'inherit' });
-        console.log(`✅ Downloaded: ${file}`);
-      } catch (error) {
-        console.log(`⚠️  Failed to download: ${file}`);
-      }
+    // Copy main server file
+    const serverSrc = path.join(templatesPath, "server.js");
+    const serverDest = path.join(projectPath, "server.js");
+    if (fs.existsSync(serverSrc)) {
+      fs.copyFileSync(serverSrc, serverDest);
+    }
+
+    // Copy storage files
+    const storageSrc = path.join(templatesPath, "storage", "storage.js");
+    const storageDest = path.join(projectPath, "storage", "storage.js");
+    if (fs.existsSync(storageSrc)) {
+      fs.copyFileSync(storageSrc, storageDest);
+    }
+
+    // Copy slave files
+    const slavesSrcDir = path.join(templatesPath, "storage", "slaves");
+    if (fs.existsSync(slavesSrcDir)) {
+      const slaveFiles = fs.readdirSync(slavesSrcDir);
+      slaveFiles.forEach(file => {
+        const src = path.join(slavesSrcDir, file);
+        const dest = path.join(projectPath, "storage", "slaves", file);
+        fs.copyFileSync(src, dest);
+      });
     }
 
     console.log("⚙️  Creating configuration...");
@@ -163,7 +176,10 @@ async function runInstaller() {
 
     execSync("npm install", { cwd: projectPath, stdio: "inherit" });
 
-    console.log(gradient("magneta", "cyan").multiline([
+    console.log("🧹 Cleaning up...");
+    execSync("rm -rf temp_repo", { stdio: "inherit" });
+
+    console.log.multiline([
       "\n✅ Installation complete!",
       "──────────────────────────────",
       `📁 Folder: ${answers.folder}`,
@@ -178,10 +194,11 @@ async function runInstaller() {
       `   cd ${answers.folder}`,
       "   npm start",
       "──────────────────────────────\n"
-    ]));
+    ]);
 
   } catch (err) {
     console.error("❌ Installation failed:", err);
+    try { execSync("rm -rf temp_repo"); } catch {}
     process.exit(1);
   }
 }
