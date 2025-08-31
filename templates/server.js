@@ -7,6 +7,9 @@ import fs from "fs";
 import path from "path";
 import config from "./config.js";
 import * as storage from "./storage/storage.js";
+import speakeasy from "speakeasy";
+import QRCode from "qrcode";
+import https from "https";
 
 const app = express();
 app.use(cors({ origin: config.cors.origin }));
@@ -96,6 +99,63 @@ const limiter = () => {
     };
 };
 
+const checkGitHubUpdates = async () => {
+    if (!config.github?.owner || !config.github?.repo) {
+        return null;
+    }
+
+    try {
+        const options = {
+            hostname: 'api.github.com',
+            path: `/repos/${config.github.owner}/${config.github.repo}/commits?per_page=1`,
+            method: 'GET',
+            headers: {
+                'User-Agent': 'ChatApp-Server',
+                'Accept': 'application/vnd.github.v3+json'
+            }
+        };
+
+        return new Promise((resolve, reject) => {
+            const req = https.request(options, (res) => {
+                let data = '';
+                res.on('data', chunk => data += chunk);
+                res.on('end', () => {
+                    if (res.statusCode === 200) {
+                        const commits = JSON.parse(data);
+                        if (commits.length > 0) {
+                            resolve({
+                                latestCommit: commits[0].sha,
+                                message: commits[0].commit.message,
+                                date: commits[0].commit.committer.date,
+                                url: commits[0].html_url
+                            });
+                        } else {
+                            resolve(null);
+                        }
+                    } else {
+                        resolve(null);
+                    }
+                });
+            });
+
+            req.on('error', (error) => {
+                logger.error("GitHub API error", { error: error.message });
+                resolve(null);
+            });
+
+            req.setTimeout(5000, () => {
+                req.destroy();
+                resolve(null);
+            });
+
+            req.end();
+        });
+    } catch (error) {
+        logger.error("GitHub update check error", { error: error.message });
+        return null;
+    }
+};
+
 const actionHandlers = {
     register: async ({ username, password }, user) => {
         if (typeof username !== "string" || typeof password !== "string") {
@@ -112,20 +172,126 @@ const actionHandlers = {
         }
     },
 
-    login: async ({ username, password }, user) => {
+    login: async ({ username, password, twoFactorToken }, user) => {
         const u = await storage.authenticate(username, password);
         if (!u) {
             logger.warn("Login failed: invalid credentials", { username });
             return { error: "login failed" };
         }
 
+        const twoFactorEnabled = await storage.isTwoFactorEnabled(username);
+        if (twoFactorEnabled) {
+            if (!twoFactorToken) {
+                return { success: false, requires2FA: true };
+            }
+
+            const secret = await storage.getTwoFactorSecret(username);
+            const verified = speakeasy.totp.verify({
+                secret: secret,
+                encoding: 'base32',
+                token: twoFactorToken,
+                window: 1
+            });
+
+            if (!verified) {
+                logger.warn("2FA verification failed", { username });
+                return { error: "invalid 2fa token" };
+            }
+        }
+
         const token = genToken();
         await storage.saveToken(username, token, Date.now() + config.security.tokenTTL);
-        logger.info("User logged in successfully", { username });
-        return { success: true, token };
+        logger.info("User logged in successfully", { username, twoFactorEnabled });
+        return { success: true, token, twoFactorEnabled };
     },
 
-    sendMessage: async ({ channel, text, replyTo }, user) => {
+    setupTwoFactor: async (payload, user) => {
+        if (!user) {
+            logger.warn("2FA setup failed: not authenticated");
+            return { error: "not auth" };
+        }
+
+        const secret = speakeasy.generateSecret({
+            name: `ChatApp:${user}`,
+            issuer: "ChatApp"
+        });
+
+        await storage.setTwoFactorSecret(user, secret.base32);
+        
+        const qrCodeUrl = await QRCode.toDataURL(secret.otpauth_url);
+        
+        logger.info("2FA setup initiated", { user });
+        return { success: true, secret: secret.base32, qrCodeUrl };
+    },
+
+    verifyTwoFactor: async ({ token }, user) => {
+        if (!user) {
+            logger.warn("2FA verification failed: not authenticated");
+            return { error: "not auth" };
+        }
+
+        const secret = await storage.getTwoFactorSecret(user);
+        const verified = speakeasy.totp.verify({
+            secret: secret,
+            encoding: 'base32',
+            token: token,
+            window: 1
+        });
+
+        if (verified) {
+            await storage.enableTwoFactor(user, true);
+            logger.info("2FA enabled successfully", { user });
+            return { success: true };
+        } else {
+            logger.warn("2FA verification failed", { user });
+            return { error: "invalid token" };
+        }
+    },
+
+    disableTwoFactor: async ({ password }, user) => {
+        if (!user) {
+            logger.warn("2FA disable failed: not authenticated");
+            return { error: "not auth" };
+        }
+
+        const authenticated = await storage.authenticate(user, password);
+        if (!authenticated) {
+            logger.warn("2FA disable failed: invalid password", { user });
+            return { error: "invalid password" };
+        }
+
+        await storage.enableTwoFactor(user, false);
+        await storage.setTwoFactorSecret(user, null);
+        
+        logger.info("2FA disabled successfully", { user });
+        return { success: true };
+    },
+
+    checkUpdates: async (payload, user) => {
+        if (!user) {
+            logger.warn("Update check failed: not authenticated");
+            return { error: "not auth" };
+        }
+
+        const updateInfo = await checkGitHubUpdates();
+        
+        if (updateInfo) {
+            logger.info("Update check completed", { user, hasUpdates: true });
+            return { 
+                success: true, 
+                hasUpdates: true, 
+                updateInfo 
+            };
+        } else {
+            logger.info("Update check completed", { user, hasUpdates: false });
+            return { 
+                success: true, 
+                hasUpdates: false 
+            };
+        }
+    },
+
+    sendMessage: async ({ channel, text, replyTo, fileId, voiceMessage }, user) => {
         if (!user || typeof channel !== "string" || typeof text !== "string") {
             logger.warn("Send message failed: bad input", { user, channel, textLength: text?.length });
             return { error: "bad input" };
@@ -135,12 +301,34 @@ const actionHandlers = {
             return { error: "not a channel member" };
         }
 
+        let fileAttachment = null;
+        if (fileId) {
+            fileAttachment = {
+                filename: fileId,
+                originalName: fileId,
+                mimetype: "application/octet-stream", 
+                size: 0,
+                downloadUrl: `/api/download/${fileId}`
+            };
+        }
+
+        let voiceAttachment = null;
+        if (voiceMessage) {
+            voiceAttachment = {
+                filename: voiceMessage,
+                duration: 0,
+                downloadUrl: `/api/download/${voiceMessage}`
+            };
+        }
+
         const msg = await storage.saveMessage({
             from: user,
             channel: channel.trim(),
             text: text.slice(0, config.security.maxMessageLength),
             ts: Date.now(),
-            replyTo: replyTo || null
+            replyTo: replyTo || null,
+            file: fileAttachment,
+            voice: voiceAttachment
         });
 
         const messageData = JSON.stringify({ type: "message", msg });
@@ -151,7 +339,7 @@ const actionHandlers = {
             try { res.write(`data: ${messageData}\n\n`); } catch {}
         });
 
-        logger.info("Message sent", { user, channel, messageId: msg.id });
+        logger.info("Message sent", { user, channel, messageId: msg.id, hasFile: !!fileId, hasVoice: !!voiceMessage });
         return { success: true, message: msg };
     },
 
@@ -346,6 +534,17 @@ const actionHandlers = {
 
         logger.info("WebRTC call ended", { from: user, to: targetUser });
         return { success: true };
+    },
+
+    uploadVoiceMessage: async ({ channel, duration }, user) => {
+        if (!user || !channel) {
+            logger.warn("Voice message upload failed: missing parameters", { user, channel });
+            return { error: "missing parameters" };
+        }
+
+        const voiceId = crypto.randomBytes(16).toString("hex") + ".ogg";
+        logger.info("Voice message upload initiated", { user, channel, voiceId, duration });
+        return { success: true, voiceId, uploadUrl: `/api/upload/voice/${voiceId}` };
     }
 };
 
@@ -406,6 +605,10 @@ const createEndpoint = (method, path, middleware, action, paramMap = null) => {
 
 createEndpoint('post', '/api/register', limiter(), 'register');
 createEndpoint('post', '/api/login', limiter(), 'login');
+createEndpoint('post', '/api/2fa/setup', authMiddleware, 'setupTwoFactor');
+createEndpoint('post', '/api/2fa/verify', authMiddleware, 'verifyTwoFactor');
+createEndpoint('post', '/api/2fa/disable', authMiddleware, 'disableTwoFactor');
+createEndpoint('get', '/api/updates/check', authMiddleware, 'checkUpdates');
 createEndpoint('post', '/api/message', channelAuthMiddleware, 'sendMessage');
 createEndpoint('get', '/api/messages', channelAuthMiddleware, 'getMessages', req => req.query);
 createEndpoint('post', '/api/channels/create', authMiddleware, 'createChannel');
@@ -420,6 +623,7 @@ createEndpoint('get', '/api/webrtc/offer', authMiddleware, 'webrtc-get-offer', r
 createEndpoint('get', '/api/webrtc/answer', authMiddleware, 'webrtc-get-answer', req => req.query);
 createEndpoint('get', '/api/webrtc/ice-candidates', authMiddleware, 'webrtc-get-ice-candidates', req => req.query);
 createEndpoint('post', '/api/webrtc/end-call', authMiddleware, 'webrtc-end-call');
+createEndpoint('post', '/api/voice/upload', authMiddleware, 'uploadVoiceMessage');
 
 app.post("/api/upload/avatar", authMiddleware, avatarUpload.single("avatar"), async (req, res) => {
     if (!req.file) {
@@ -498,6 +702,24 @@ app.post("/api/upload/file", authMiddleware, fileUpload.single("file"), (req, re
     });
 });
 
+app.post("/api/upload/voice/:voiceId", authMiddleware, (req, res) => {
+    const voiceId = req.params.voiceId;
+    const filePath = path.join(config.uploads.dir, voiceId);
+    
+    const writeStream = fs.createWriteStream(filePath);
+    req.pipe(writeStream);
+
+    writeStream.on('finish', () => {
+        logger.info("Voice message uploaded", { user: req.user, voiceId, size: fs.statSync(filePath).size });
+        res.json({ success: true, voiceId });
+    });
+
+    writeStream.on('error', (error) => {
+        logger.error("Voice message upload failed", { user: req.user, voiceId, error: error.message });
+        res.status(500).json({ error: "upload failed" });
+    });
+});
+
 app.get("/api/download/:filename", (req, res) => {
     const filename = req.params.filename;
     const filePath = path.join(config.uploads.dir, filename);
@@ -508,8 +730,14 @@ app.get("/api/download/:filename", (req, res) => {
     }
 
     if (fs.existsSync(filePath)) {
-        logger.info("File downloaded", { filename, ip: req.ip });
-        res.download(filePath);
+        logger.info("File download started", { filename, ip: req.ip, size: fs.statSync(filePath).size });
+        res.download(filePath, (err) => {
+            if (err) {
+                logger.error("File download error", { filename, error: err.message, ip: req.ip });
+            } else {
+                logger.info("File download completed", { filename, ip: req.ip });
+            }
+        });
     } else {
         logger.warn("File not found for download", { filename, ip: req.ip });
         res.status(404).json({ error: "file not found" });
@@ -591,5 +819,5 @@ if (config.features.ws) {
 } else {
     app.listen(config.server.port, config.server.host, () => {
         logger.info("Server started", { host: config.server.host, port: config.server.port });
-    });
+    })
 }

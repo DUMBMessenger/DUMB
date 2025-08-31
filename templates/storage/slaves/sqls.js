@@ -1,13 +1,160 @@
-import fs from "fs";
-import initSqlJs from "sql.js";
-import mysql from "mysql2/promise";
-import crypto from "crypto";
 import config from "../../config.js";
+import path from "path";
+import crypto from "crypto";
 
 let db;
-let dbFile = config.storage.sqlite;
-let sqlMode = config.storage.type;
-let mysqlConn;
+let pool;
+
+async function initDatabase() {
+  if (config.storage.type === "sqlite") {
+    const { Database } = await import('sql.js');
+    const fs = await import('fs');
+    
+    let databaseData;
+    const dbPath = path.resolve(config.storage.file);
+    
+    try {
+      if (fs.existsSync(dbPath)) {
+        databaseData = fs.readFileSync(dbPath);
+      }
+    } catch (error) {
+      console.warn("Could not read existing database file, creating new one");
+    }
+    
+    db = new Database(databaseData);
+    createTables();
+    
+    setInterval(() => {
+      try {
+        const data = db.export();
+        fs.writeFileSync(dbPath, Buffer.from(data));
+      } catch (error) {
+        console.error("Failed to save database:", error);
+      }
+    }, 30000);
+    
+  } else if (config.storage.type === "mysql") {
+    const mysql = await import('mysql2/promise');
+    
+    pool = mysql.createPool({
+      host: config.storage.host,
+      port: config.storage.port,
+      user: config.storage.user,
+      password: config.storage.password,
+      database: config.storage.database,
+      connectionLimit: 10,
+      acquireTimeout: 60000,
+      timeout: 60000,
+      reconnect: true
+    });
+    
+    await createTables();
+  }
+}
+
+async function createTables() {
+  const tables = [
+    `CREATE TABLE IF NOT EXISTS users (
+      username VARCHAR(255) PRIMARY KEY,
+      password_hash VARCHAR(255) NOT NULL,
+      salt VARCHAR(255),
+      avatar VARCHAR(255),
+      two_factor_enabled BOOLEAN DEFAULT FALSE,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )`,
+    
+    `CREATE TABLE IF NOT EXISTS tokens (
+      token VARCHAR(255) PRIMARY KEY,
+      username VARCHAR(255) NOT NULL,
+      expires BIGINT NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE
+    )`,
+    
+    `CREATE TABLE IF NOT EXISTS channels (
+      name VARCHAR(255) PRIMARY KEY,
+      creator VARCHAR(255) NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (creator) REFERENCES users(username) ON DELETE CASCADE
+    )`,
+    
+    `CREATE TABLE IF NOT EXISTS channel_members (
+      channel VARCHAR(255) NOT NULL,
+      username VARCHAR(255) NOT NULL,
+      joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (channel, username),
+      FOREIGN KEY (channel) REFERENCES channels(name) ON DELETE CASCADE,
+      FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE
+    )`,
+    
+    `CREATE TABLE IF NOT EXISTS messages (
+      id VARCHAR(255) PRIMARY KEY,
+      channel VARCHAR(255) NOT NULL,
+      from_user VARCHAR(255) NOT NULL,
+      text TEXT NOT NULL,
+      ts BIGINT NOT NULL,
+      reply_to VARCHAR(255),
+      file_attachment TEXT,
+      voice_attachment TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (channel) REFERENCES channels(name) ON DELETE CASCADE,
+      FOREIGN KEY (from_user) REFERENCES users(username) ON DELETE CASCADE
+    )`,
+    
+    `CREATE TABLE IF NOT EXISTS webrtc_offers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      from_user VARCHAR(255) NOT NULL,
+      to_user VARCHAR(255) NOT NULL,
+      offer TEXT NOT NULL,
+      channel VARCHAR(255),
+      timestamp BIGINT NOT NULL,
+      FOREIGN KEY (from_user) REFERENCES users(username) ON DELETE CASCADE,
+      FOREIGN KEY (to_user) REFERENCES users(username) ON DELETE CASCADE
+    )`,
+    
+    `CREATE TABLE IF NOT EXISTS webrtc_answers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      from_user VARCHAR(255) NOT NULL,
+      to_user VARCHAR(255) NOT NULL,
+      answer TEXT NOT NULL,
+      timestamp BIGINT NOT NULL,
+      FOREIGN KEY (from_user) REFERENCES users(username) ON DELETE CASCADE,
+      FOREIGN KEY (to_user) REFERENCES users(username) ON DELETE CASCADE
+    )`,
+    
+    `CREATE TABLE IF NOT EXISTS ice_candidates (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      from_user VARCHAR(255) NOT NULL,
+      to_user VARCHAR(255) NOT NULL,
+      candidate TEXT NOT NULL,
+      timestamp BIGINT NOT NULL,
+      FOREIGN KEY (from_user) REFERENCES users(username) ON DELETE CASCADE,
+      FOREIGN KEY (to_user) REFERENCES users(username) ON DELETE CASCADE
+    )`,
+    
+    `CREATE TABLE IF NOT EXISTS two_factor_secrets (
+      username VARCHAR(255) PRIMARY KEY,
+      secret VARCHAR(255),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE
+    )`
+  ];
+  
+  if (config.storage.type === "sqlite") {
+    for (const tableSql of tables) {
+      db.run(tableSql);
+    }
+  } else if (config.storage.type === "mysql") {
+    const connection = await pool.getConnection();
+    try {
+      for (const tableSql of tables) {
+        await connection.execute(tableSql);
+      }
+    } finally {
+      connection.release();
+    }
+  }
+}
 
 function pbkdf2(password, salt) {
   return crypto.pbkdf2Sync(
@@ -23,340 +170,321 @@ function sha256(str) {
   return crypto.createHash("sha256").update(str).digest("hex");
 }
 
-async function init() {
-  if (sqlMode === "sqlite") {
-    const SQL = await initSqlJs();
-    if (fs.existsSync(dbFile)) {
-      const filebuffer = fs.readFileSync(dbFile);
-      db = new SQL.Database(filebuffer);
-    } else {
-      db = new SQL.Database();
+async function query(sql, params = []) {
+  if (config.storage.type === "sqlite") {
+    return db.exec(sql, params);
+  } else if (config.storage.type === "mysql") {
+    const connection = await pool.getConnection();
+    try {
+      const [rows] = await connection.execute(sql, params);
+      return rows;
+    } finally {
+      connection.release();
     }
-    db.run("CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, passwordHash TEXT, salt TEXT)");
-    db.run("CREATE TABLE IF NOT EXISTS tokens (username TEXT, token TEXT, expiry INTEGER)");
-    db.run("CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, channel TEXT, fromUser TEXT, text TEXT, ts INTEGER, replyTo TEXT)");
-    db.run("CREATE TABLE IF NOT EXISTS channels (name TEXT PRIMARY KEY, createdBy TEXT, createdAt INTEGER)");
-    db.run("CREATE TABLE IF NOT EXISTS channel_members (channel TEXT, username TEXT, joinedAt INTEGER, PRIMARY KEY(channel, username))");
-    db.run("CREATE TABLE IF NOT EXISTS webrtc_offers (id INTEGER PRIMARY KEY AUTOINCREMENT, fromUser TEXT, toUser TEXT, offer TEXT, channel TEXT, timestamp INTEGER)");
-    db.run("CREATE TABLE IF NOT EXISTS webrtc_answers (id INTEGER PRIMARY KEY AUTOINCREMENT, fromUser TEXT, toUser TEXT, answer TEXT, timestamp INTEGER)");
-    db.run("CREATE TABLE IF NOT EXISTS ice_candidates (id INTEGER PRIMARY KEY AUTOINCREMENT, fromUser TEXT, toUser TEXT, candidate TEXT, timestamp INTEGER)");
-  } else if (sqlMode === "mysql") {
-    mysqlConn = await mysql.createConnection(config.storage.mysql);
-    await mysqlConn.execute("CREATE TABLE IF NOT EXISTS users (username VARCHAR(255) PRIMARY KEY, passwordHash TEXT, salt TEXT)");
-    await mysqlConn.execute("CREATE TABLE IF NOT EXISTS tokens (username VARCHAR(255), token TEXT, expiry BIGINT)");
-    await mysqlConn.execute("CREATE TABLE IF NOT EXISTS messages (id VARCHAR(255) PRIMARY KEY, channel VARCHAR(255), fromUser VARCHAR(255), text TEXT, ts BIGINT, replyTo VARCHAR(255))");
-    await mysqlConn.execute("CREATE TABLE IF NOT EXISTS channels (name VARCHAR(255) PRIMARY KEY, createdBy VARCHAR(255), createdAt BIGINT)");
-    await mysqlConn.execute("CREATE TABLE IF NOT EXISTS channel_members (channel VARCHAR(255), username VARCHAR(255), joinedAt BIGINT, PRIMARY KEY(channel, username))");
-    await mysqlConn.execute("CREATE TABLE IF NOT EXISTS webrtc_offers (id BIGINT AUTO_INCREMENT PRIMARY KEY, fromUser VARCHAR(255), toUser VARCHAR(255), offer TEXT, channel VARCHAR(255), timestamp BIGINT)");
-    await mysqlConn.execute("CREATE TABLE IF NOT EXISTS webrtc_answers (id BIGINT AUTO_INCREMENT PRIMARY KEY, fromUser VARCHAR(255), toUser VARCHAR(255), answer TEXT, timestamp BIGINT)");
-    await mysqlConn.execute("CREATE TABLE IF NOT EXISTS ice_candidates (id BIGINT AUTO_INCREMENT PRIMARY KEY, fromUser VARCHAR(255), toUser VARCHAR(255), candidate TEXT, timestamp BIGINT)");
   }
 }
 
-function persist() {
-  if (sqlMode === "sqlite") {
-    const data = db.export();
-    fs.writeFileSync(dbFile, Buffer.from(data));
+async function queryOne(sql, params = []) {
+  if (config.storage.type === "sqlite") {
+    const result = db.exec(sql, params);
+    return result[0]?.values[0] || null;
+  } else if (config.storage.type === "mysql") {
+    const connection = await pool.getConnection();
+    try {
+      const [rows] = await connection.execute(sql, params);
+      return rows[0] || null;
+    } finally {
+      connection.release();
+    }
   }
 }
 
 export async function registerUser(username, passwordPlain) {
+  const existingUser = await queryOne("SELECT username FROM users WHERE username = ?", [username]);
+  if (existingUser) return false;
+  
   const salt = crypto.randomBytes(16).toString("hex");
   const passwordHash = pbkdf2(passwordPlain, salt);
-  if (sqlMode === "sqlite") {
-    const stmt = db.prepare("SELECT 1 FROM users WHERE username=?");
-    const exists = stmt.getAsObject([username]);
-    stmt.free();
-    if (exists.username) return false;
-    db.run("INSERT INTO users (username,passwordHash,salt) VALUES (?,?,?)", [username, passwordHash, salt]);
-    persist();
-    return true;
-  } else {
-    const [rows] = await mysqlConn.execute("SELECT 1 FROM users WHERE username=?", [username]);
-    if (rows.length) return false;
-    await mysqlConn.execute("INSERT INTO users (username,passwordHash,salt) VALUES (?,?,?)", [username, passwordHash, salt]);
-    return true;
-  }
+  
+  await query("INSERT INTO users (username, password_hash, salt) VALUES (?, ?, ?)", 
+    [username, passwordHash, salt]);
+  
+  return true;
 }
 
 export async function authenticate(username, passwordPlain) {
-  if (sqlMode === "sqlite") {
-    const stmt = db.prepare("SELECT * FROM users WHERE username=?");
-    const row = stmt.getAsObject([username]);
-    stmt.free();
-    if (!row.username) return null;
-    if (row.salt) {
-      const check = pbkdf2(passwordPlain, row.salt);
-      return check === row.passwordHash ? row : null;
-    } else {
-      const legacy = sha256(passwordPlain);
-      return legacy === row.passwordHash ? row : null;
-    }
+  const user = await queryOne("SELECT * FROM users WHERE username = ?", [username]);
+  if (!user) return null;
+  
+  let isValid;
+  if (user.salt) {
+    const check = pbkdf2(passwordPlain, user.salt);
+    isValid = check === user.password_hash;
   } else {
-    const [rows] = await mysqlConn.execute("SELECT * FROM users WHERE username=?", [username]);
-    if (!rows.length) return null;
-    const u = rows[0];
-    if (u.salt) {
-      const check = pbkdf2(passwordPlain, u.salt);
-      return check === u.passwordHash ? u : null;
-    } else {
-      const legacy = sha256(passwordPlain);
-      return legacy === u.passwordHash ? u : null;
-    }
+    const check = sha256(passwordPlain);
+    isValid = check === user.password_hash;
   }
+  
+  return isValid ? username : null;
 }
 
-export async function saveToken(username, token, expiry) {
-  if (sqlMode === "sqlite") {
-    db.run("DELETE FROM tokens WHERE username=?", [username]);
-    db.run("INSERT INTO tokens (username,token,expiry) VALUES (?,?,?)", [username, token, expiry]);
-    persist();
-  } else {
-    await mysqlConn.execute("DELETE FROM tokens WHERE username=?", [username]);
-    await mysqlConn.execute("INSERT INTO tokens (username,token,expiry) VALUES (?,?,?)", [username, token, expiry]);
-  }
+export async function saveToken(username, token, expires) {
+  await query("DELETE FROM tokens WHERE expires < ?", [Date.now()]);
+  
+  await query("INSERT INTO tokens (token, username, expires) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE expires = ?", 
+    [token, username, expires, expires]);
+  
+  return true;
 }
 
 export async function validateToken(token) {
-  const now = Date.now();
-  if (sqlMode === "sqlite") {
-    db.run("DELETE FROM tokens WHERE expiry <= ?", [now]);
-    const stmt = db.prepare("SELECT username FROM tokens WHERE token=?");
-    const row = stmt.getAsObject([token]);
-    stmt.free();
-    return row.username || null;
-  } else {
-    await mysqlConn.execute("DELETE FROM tokens WHERE expiry <= ?", [now]);
-    const [rows] = await mysqlConn.execute("SELECT username FROM tokens WHERE token=?", [token]);
-    return rows.length ? rows[0].username : null;
-  }
+  await query("DELETE FROM tokens WHERE expires < ?", [Date.now()]);
+  
+  const result = await queryOne("SELECT username FROM tokens WHERE token = ?", [token]);
+  return result ? result.username : null;
 }
 
 export async function saveMessage(msg) {
-  const messageId = crypto.randomBytes(16).toString("hex");
-  const messageWithId = { ...msg, id: messageId };
+  msg.id = crypto.randomBytes(16).toString("hex");
   
-  if (sqlMode === "sqlite") {
-    db.run("INSERT INTO messages (id, channel, fromUser, text, ts, replyTo) VALUES (?,?,?,?,?,?)", 
-      [messageId, msg.channel, msg.from, msg.text, msg.ts, msg.replyTo || null]);
-    persist();
-    return messageWithId;
-  } else {
-    await mysqlConn.execute("INSERT INTO messages (id, channel, fromUser, text, ts, replyTo) VALUES (?,?,?,?,?,?)", 
-      [messageId, msg.channel, msg.from, msg.text, msg.ts, msg.replyTo || null]);
-    return messageWithId;
-  }
+  await query(
+    `INSERT INTO messages (id, channel, from_user, text, ts, reply_to, file_attachment, voice_attachment) 
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      msg.id,
+      msg.channel,
+      msg.from,
+      msg.text,
+      msg.ts,
+      msg.replyTo || null,
+      msg.file ? JSON.stringify(msg.file) : null,
+      msg.voice ? JSON.stringify(msg.voice) : null
+    ]
+  );
+  
+  return msg;
 }
 
-export async function getMessages(channel, limit = 100, beforeTs = null) {
-  if (sqlMode === "sqlite") {
-    let query = "SELECT * FROM messages WHERE channel=? ";
-    let params = [channel];
-    if (beforeTs) {
-      query += "AND ts < ? ";
-      params.push(beforeTs);
-    }
-    query += "ORDER BY ts ASC LIMIT ?";
-    params.push(limit);
-    const stmt = db.prepare(query);
-    const rows = [];
-    stmt.bind(params);
-    while (stmt.step()) rows.push(stmt.getAsObject());
-    stmt.free();
-    return rows;
-  } else {
-    let query = "SELECT * FROM messages WHERE channel=? ";
-    let params = [channel];
-    if (beforeTs) {
-      query += "AND ts < ? ";
-      params.push(beforeTs);
-    }
-    query += "ORDER BY ts ASC LIMIT ?";
-    params.push(limit);
-    const [rows] = await mysqlConn.execute(query, params);
-    return rows;
+export async function getMessages(channel, limit, before) {
+  let sql = `SELECT * FROM messages WHERE channel = ?`;
+  const params = [channel];
+  
+  if (before) {
+    sql += " AND ts < ?";
+    params.push(before);
   }
+  
+  sql += " ORDER BY ts DESC LIMIT ?";
+  params.push(limit);
+  
+  const messages = await query(sql, params);
+  return messages.map(msg => ({
+    id: msg.id,
+    from: msg.from_user,
+    channel: msg.channel,
+    text: msg.text,
+    ts: msg.ts,
+    replyTo: msg.reply_to,
+    file: msg.file_attachment ? JSON.parse(msg.file_attachment) : null,
+    voice: msg.voice_attachment ? JSON.parse(msg.voice_attachment) : null
+  })).reverse();
 }
 
 export async function createChannel(channelName, creator) {
-  if (sqlMode === "sqlite") {
-    const stmt = db.prepare("SELECT 1 FROM channels WHERE name=?");
-    const exists = stmt.getAsObject([channelName]);
-    stmt.free();
-    if (exists.name) return false;
-    
-    db.run("INSERT INTO channels (name, createdBy, createdAt) VALUES (?, ?, ?)", [channelName, creator, Date.now()]);
-    await joinChannel(channelName, creator);
-    persist();
-    return true;
-  } else {
-    const [rows] = await mysqlConn.execute("SELECT 1 FROM channels WHERE name=?", [channelName]);
-    if (rows.length) return false;
-    
-    await mysqlConn.execute("INSERT INTO channels (name, createdBy, createdAt) VALUES (?, ?, ?)", [channelName, creator, Date.now()]);
+  try {
+    await query("INSERT INTO channels (name, creator) VALUES (?, ?)", [channelName, creator]);
     await joinChannel(channelName, creator);
     return true;
+  } catch (error) {
+    if (error.message.includes("UNIQUE constraint failed") || error.code === "ER_DUP_ENTRY") {
+      return false;
+    }
+    throw error;
   }
 }
 
 export async function getChannels(username) {
-  if (sqlMode === "sqlite") {
-    const query = `
-      SELECT c.name FROM channels c
-      JOIN channel_members cm ON c.name = cm.channel
-      WHERE cm.username = ?
-    `;
-    const stmt = db.prepare(query);
-    stmt.bind([username]);
-    const rows = [];
-    while (stmt.step()) rows.push(stmt.getAsObject().name);
-    stmt.free();
-    return rows;
-  } else {
-    const [rows] = await mysqlConn.execute(`
-      SELECT c.name FROM channels c
-      JOIN channel_members cm ON c.name = cm.channel
-      WHERE cm.username = ?
-    `, [username]);
-    return rows.map(row => row.name);
+  const channels = await query(
+    `SELECT c.* FROM channels c 
+     JOIN channel_members cm ON c.name = cm.channel 
+     WHERE cm.username = ?`,
+    [username]
+  );
+  
+  return channels;
+}
+
+export async function joinChannel(channel, username) {
+  const channelExists = await queryOne("SELECT name FROM channels WHERE name = ?", [channel]);
+  if (!channelExists) return false;
+  
+  try {
+    await query(
+      "INSERT INTO channel_members (channel, username) VALUES (?, ?) ON DUPLICATE KEY UPDATE joined_at = CURRENT_TIMESTAMP",
+      [channel, username]
+    );
+    return true;
+  } catch (error) {
+    return false;
   }
 }
 
-export async function joinChannel(channelName, username) {
-  if (sqlMode === "sqlite") {
-    const stmt = db.prepare("SELECT 1 FROM channels WHERE name=?");
-    const exists = stmt.getAsObject([channelName]);
-    stmt.free();
-    if (!exists.name) return false;
-    
-    db.run("INSERT OR IGNORE INTO channel_members (channel, username, joinedAt) VALUES (?, ?, ?)", [channelName, username, Date.now()]);
-    persist();
-    return true;
+export async function leaveChannel(channel, username) {
+  const result = await query(
+    "DELETE FROM channel_members WHERE channel = ? AND username = ?",
+    [channel, username]
+  );
+  
+  if (config.storage.type === "sqlite") {
+    return result.affectedRows > 0;
   } else {
-    const [rows] = await mysqlConn.execute("SELECT 1 FROM channels WHERE name=?", [channelName]);
-    if (!rows.length) return false;
-    
-    await mysqlConn.execute("INSERT IGNORE INTO channel_members (channel, username, joinedAt) VALUES (?, ?, ?)", [channelName, username, Date.now()]);
-    return true;
-  }
-}
-
-export async function leaveChannel(channelName, username) {
-  if (sqlMode === "sqlite") {
-    db.run("DELETE FROM channel_members WHERE channel=? AND username=?", [channelName, username]);
-    persist();
-    return db.getRowsModified() > 0;
-  } else {
-    const [result] = await mysqlConn.execute("DELETE FROM channel_members WHERE channel=? AND username=?", [channelName, username]);
     return result.affectedRows > 0;
   }
 }
 
-export async function getChannelMembers(channelName) {
-  if (sqlMode === "sqlite") {
-    const stmt = db.prepare("SELECT username FROM channel_members WHERE channel=?");
-    stmt.bind([channelName]);
-    const rows = [];
-    while (stmt.step()) rows.push(stmt.getAsObject().username);
-    stmt.free();
-    return rows;
-  } else {
-    const [rows] = await mysqlConn.execute("SELECT username FROM channel_members WHERE channel=?", [channelName]);
-    return rows.map(row => row.username);
-  }
+export async function getChannelMembers(channel) {
+  const members = await query(
+    "SELECT username FROM channel_members WHERE channel = ?",
+    [channel]
+  );
+  
+  return members.map(m => m.username);
 }
 
-export async function isChannelMember(channelName, username) {
-  if (sqlMode === "sqlite") {
-    const stmt = db.prepare("SELECT 1 FROM channel_members WHERE channel=? AND username=?");
-    const exists = stmt.getAsObject([channelName, username]);
-    stmt.free();
-    return !!exists.channel;
-  } else {
-    const [rows] = await mysqlConn.execute("SELECT 1 FROM channel_members WHERE channel=? AND username=?", [channelName, username]);
-    return rows.length > 0;
-  }
+export async function isChannelMember(channel, username) {
+  const result = await queryOne(
+    "SELECT 1 FROM channel_members WHERE channel = ? AND username = ?",
+    [channel, username]
+  );
+  
+  return !!result;
 }
 
 export async function saveWebRTCOffer(fromUser, toUser, offer, channel) {
-  if (sqlMode === "sqlite") {
-    db.run("DELETE FROM webrtc_offers WHERE fromUser=? AND toUser=?", [fromUser, toUser]);
-    db.run("INSERT INTO webrtc_offers (fromUser, toUser, offer, channel, timestamp) VALUES (?, ?, ?, ?, ?)", 
-      [fromUser, toUser, offer, channel, Date.now()]);
-    persist();
-    return true;
-  } else {
-    await mysqlConn.execute("DELETE FROM webrtc_offers WHERE fromUser=? AND toUser=?", [fromUser, toUser]);
-    await mysqlConn.execute("INSERT INTO webrtc_offers (fromUser, toUser, offer, channel, timestamp) VALUES (?, ?, ?, ?, ?)", 
-      [fromUser, toUser, offer, channel, Date.now()]);
-    return true;
-  }
+  await query("DELETE FROM webrtc_offers WHERE timestamp < ?", [Date.now() - 300000]);
+  
+  await query(
+    "INSERT INTO webrtc_offers (from_user, to_user, offer, channel, timestamp) VALUES (?, ?, ?, ?, ?)",
+    [fromUser, toUser, JSON.stringify(offer), channel, Date.now()]
+  );
 }
 
 export async function getWebRTCOffer(fromUser, toUser) {
-  if (sqlMode === "sqlite") {
-    const stmt = db.prepare("SELECT * FROM webrtc_offers WHERE fromUser=? AND toUser=? ORDER BY timestamp DESC LIMIT 1");
-    const row = stmt.getAsObject([fromUser, toUser]);
-    stmt.free();
-    return row.fromUser ? row : null;
-  } else {
-    const [rows] = await mysqlConn.execute("SELECT * FROM webrtc_offers WHERE fromUser=? AND toUser=? ORDER BY timestamp DESC LIMIT 1", [fromUser, toUser]);
-    return rows.length ? rows[0] : null;
-  }
+  await query("DELETE FROM webrtc_offers WHERE timestamp < ?", [Date.now() - 300000]);
+  
+  const result = await queryOne(
+    "SELECT * FROM webrtc_offers WHERE from_user = ? AND to_user = ? ORDER BY timestamp DESC LIMIT 1",
+    [fromUser, toUser]
+  );
+  
+  if (!result) return null;
+  
+  return {
+    fromUser: result.from_user,
+    toUser: result.to_user,
+    offer: JSON.parse(result.offer),
+    channel: result.channel,
+    timestamp: result.timestamp
+  };
 }
 
 export async function saveWebRTCAnswer(fromUser, toUser, answer) {
-  if (sqlMode === "sqlite") {
-    db.run("DELETE FROM webrtc_answers WHERE fromUser=? AND toUser=?", [fromUser, toUser]);
-    db.run("INSERT INTO webrtc_answers (fromUser, toUser, answer, timestamp) VALUES (?, ?, ?, ?)", 
-      [fromUser, toUser, answer, Date.now()]);
-    persist();
-    return true;
-  } else {
-    await mysqlConn.execute("DELETE FROM webrtc_answers WHERE fromUser=? AND toUser=?", [fromUser, toUser]);
-    await mysqlConn.execute("INSERT INTO webrtc_answers (fromUser, toUser, answer, timestamp) VALUES (?, ?, ?, ?)", 
-      [fromUser, toUser, answer, Date.now()]);
-    return true;
-  }
+  await query("DELETE FROM webrtc_answers WHERE timestamp < ?", [Date.now() - 300000]);
+  
+  await query(
+    "INSERT INTO webrtc_answers (from_user, to_user, answer, timestamp) VALUES (?, ?, ?, ?)",
+    [fromUser, toUser, JSON.stringify(answer), Date.now()]
+  );
 }
 
 export async function getWebRTCAnswer(fromUser, toUser) {
-  if (sqlMode === "sqlite") {
-    const stmt = db.prepare("SELECT * FROM webrtc_answers WHERE fromUser=? AND toUser=? ORDER BY timestamp DESC LIMIT 1");
-    const row = stmt.getAsObject([fromUser, toUser]);
-    stmt.free();
-    return row.fromUser ? row : null;
-  } else {
-    const [rows] = await mysqlConn.execute("SELECT * FROM webrtc_answers WHERE fromUser=? AND toUser=? ORDER BY timestamp DESC LIMIT 1", [fromUser, toUser]);
-    return rows.length ? rows[0] : null;
-  }
+  await query("DELETE FROM webrtc_answers WHERE timestamp < ?", [Date.now() - 300000]);
+  
+  const result = await queryOne(
+    "SELECT * FROM webrtc_answers WHERE from_user = ? AND to_user = ? ORDER BY timestamp DESC LIMIT 1",
+    [fromUser, toUser]
+  );
+  
+  if (!result) return null;
+  
+  return {
+    fromUser: result.from_user,
+    toUser: result.to_user,
+    answer: JSON.parse(result.answer),
+    timestamp: result.timestamp
+  };
 }
 
 export async function saveICECandidate(fromUser, toUser, candidate) {
-  if (sqlMode === "sqlite") {
-    db.run("INSERT INTO ice_candidates (fromUser, toUser, candidate, timestamp) VALUES (?, ?, ?, ?)", 
-      [fromUser, toUser, candidate, Date.now()]);
-    persist();
-    return true;
-  } else {
-    await mysqlConn.execute("INSERT INTO ice_candidates (fromUser, toUser, candidate, timestamp) VALUES (?, ?, ?, ?)", 
-      [fromUser, toUser, candidate, Date.now()]);
-    return true;
-  }
+  await query("DELETE FROM ice_candidates WHERE timestamp < ?", [Date.now() - 300000]);
+  
+  await query(
+    "INSERT INTO ice_candidates (from_user, to_user, candidate, timestamp) VALUES (?, ?, ?, ?)",
+    [fromUser, toUser, JSON.stringify(candidate), Date.now()]
+  );
 }
 
 export async function getICECandidates(fromUser, toUser) {
-  if (sqlMode === "sqlite") {
-    const stmt = db.prepare("SELECT * FROM ice_candidates WHERE fromUser=? AND toUser=? ORDER BY timestamp ASC");
-    stmt.bind([fromUser, toUser]);
-    const rows = [];
-    while (stmt.step()) rows.push(stmt.getAsObject());
-    stmt.free();
-    return rows;
+  await query("DELETE FROM ice_candidates WHERE timestamp < ?", [Date.now() - 300000]);
+  
+  const candidates = await query(
+    "SELECT candidate FROM ice_candidates WHERE from_user = ? AND to_user = ? ORDER BY timestamp ASC",
+    [fromUser, toUser]
+  );
+  
+  return candidates.map(c => JSON.parse(c.candidate));
+}
+
+export async function updateUserAvatar(username, avatarFilename) {
+  const result = await query(
+    "UPDATE users SET avatar = ? WHERE username = ?",
+    [avatarFilename, username]
+  );
+  
+  if (config.storage.type === "sqlite") {
+    return result.affectedRows > 0;
   } else {
-    const [rows] = await mysqlConn.execute("SELECT * FROM ice_candidates WHERE fromUser=? AND toUser=? ORDER BY timestamp ASC", [fromUser, toUser]);
-    return rows;
+    return result.affectedRows > 0;
   }
 }
 
-await init();
+export async function getUsers() {
+  const users = await query("SELECT username, avatar FROM users");
+  return users;
+}
+
+export async function isTwoFactorEnabled(username) {
+  const user = await queryOne("SELECT two_factor_enabled FROM users WHERE username = ?", [username]);
+  return user ? user.two_factor_enabled : false;
+}
+
+export async function getTwoFactorSecret(username) {
+  const secret = await queryOne("SELECT secret FROM two_factor_secrets WHERE username = ?", [username]);
+  return secret ? secret.secret : null;
+}
+
+export async function setTwoFactorSecret(username, secret) {
+  await query(
+    `INSERT INTO two_factor_secrets (username, secret) VALUES (?, ?) 
+     ON DUPLICATE KEY UPDATE secret = ?`,
+    [username, secret, secret]
+  );
+}
+
+export async function enableTwoFactor(username, enabled) {
+  const result = await query(
+    "UPDATE users SET two_factor_enabled = ? WHERE username = ?",
+    [enabled, username]
+  );
+  
+  if (config.storage.type === "sqlite") {
+    return result.affectedRows > 0;
+  } else {
+    return result.affectedRows > 0;
+  }
+}
+
+initDatabase().catch(error => {
+  console.error("Failed to initialize database:", error);
+  process.exit(1);
+});

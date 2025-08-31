@@ -32,3 +32,7 @@ export const saveICECandidate = backend.saveICECandidate;
 export const getICECandidates = backend.getICECandidates;
 export const updateUserAvatar = backend.updateUserAvatar;
 export const getUsers = backend.getUsers;
+export const isTwoFactorEnabled = backend.isTwoFactorEnabled;
+export const getTwoFactorSecret = backend.getTwoFactorSecret;
+export const setTwoFactorSecret = backend.setTwoFactorSecret;
+export const enableTwoFactor = backend.enableTwoFactor;

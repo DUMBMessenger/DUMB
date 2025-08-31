@@ -112,6 +112,10 @@ async function runInstaller() {
 
     console.log("⚙️  Creating configuration...");
     const configContent = `export default {
+  github: {
+    owner: "debianrose",
+    repo: "dumb"
+  },
   server: {
     host: "0.0.0.0",
     port: ${answers.port}
