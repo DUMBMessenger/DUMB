@@ -1,6 +1,6 @@
 {
   "name": "dpkgdumb",
-  "version": "1.0.23",
+  "version": "1.0.24",
   "description": "Lightweight Decentralised Messenger",
   "type": "module",
   "bin": {
