@@ -166,7 +166,7 @@ async function runInstaller() {
       dependencies: {
         express: "^4.18.2",
         ws: "^8.17.0",
-        "sql.js": "^1.9.0",
+        "sql.js": "^1.8.0",
         mysql2: "^3.9.7",
         multer: "^1.4.4",
         cors: "^2.8.5"

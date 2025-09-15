@@ -7,35 +7,39 @@ let pool;
 
 async function initDatabase() {
   if (config.storage.type === "sqlite") {
-    const { Database } = await import('sql.js');
-    const fs = await import('fs');
-    
+    const initSqlJs = await import("sql.js");
+    const fs = await import("fs");
+
     let databaseData;
     const dbPath = path.resolve(config.storage.file);
-    
+
     try {
       if (fs.existsSync(dbPath)) {
-        databaseData = fs.readFileSync(dbPath);
+        databaseData = new Uint8Array(fs.readFileSync(dbPath));
       }
     } catch (error) {
       console.warn("Could not read existing database file, creating new one");
     }
-    
-    db = new Database(databaseData);
-    createTables();
-    
-    setInterval(() => {
+
+    const SQL = await initSqlJs.default();
+    db = new SQL.Database(databaseData);
+    await createTables();
+
+    const saveDb = () => {
       try {
         const data = db.export();
         fs.writeFileSync(dbPath, Buffer.from(data));
       } catch (error) {
         console.error("Failed to save database:", error);
       }
-    }, 30000);
-    
+    };
+
+    setInterval(saveDb, 30000);
+    process.on("exit", saveDb);
+
   } else if (config.storage.type === "mysql") {
-    const mysql = await import('mysql2/promise');
-    
+    const mysql = await import("mysql2/promise");
+
     pool = mysql.createPool({
       host: config.storage.host,
       port: config.storage.port,
@@ -45,9 +49,9 @@ async function initDatabase() {
       connectionLimit: 10,
       acquireTimeout: 60000,
       timeout: 60000,
-      reconnect: true
+      reconnect: true,
     });
-    
+
     await createTables();
   }
 }
@@ -62,7 +66,6 @@ async function createTables() {
       two_factor_enabled BOOLEAN DEFAULT FALSE,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )`,
-    
     `CREATE TABLE IF NOT EXISTS tokens (
       token VARCHAR(255) PRIMARY KEY,
       username VARCHAR(255) NOT NULL,
@@ -70,14 +73,12 @@ async function createTables() {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE
     )`,
-    
     `CREATE TABLE IF NOT EXISTS channels (
       name VARCHAR(255) PRIMARY KEY,
       creator VARCHAR(255) NOT NULL,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (creator) REFERENCES users(username) ON DELETE CASCADE
     )`,
-    
     `CREATE TABLE IF NOT EXISTS channel_members (
       channel VARCHAR(255) NOT NULL,
       username VARCHAR(255) NOT NULL,
@@ -86,7 +87,6 @@ async function createTables() {
       FOREIGN KEY (channel) REFERENCES channels(name) ON DELETE CASCADE,
       FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE
     )`,
-    
     `CREATE TABLE IF NOT EXISTS messages (
       id VARCHAR(255) PRIMARY KEY,
       channel VARCHAR(255) NOT NULL,
@@ -100,7 +100,6 @@ async function createTables() {
       FOREIGN KEY (channel) REFERENCES channels(name) ON DELETE CASCADE,
       FOREIGN KEY (from_user) REFERENCES users(username) ON DELETE CASCADE
     )`,
-    
     `CREATE TABLE IF NOT EXISTS webrtc_offers (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       from_user VARCHAR(255) NOT NULL,
@@ -111,7 +110,6 @@ async function createTables() {
       FOREIGN KEY (from_user) REFERENCES users(username) ON DELETE CASCADE,
       FOREIGN KEY (to_user) REFERENCES users(username) ON DELETE CASCADE
     )`,
-    
     `CREATE TABLE IF NOT EXISTS webrtc_answers (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       from_user VARCHAR(255) NOT NULL,
@@ -121,7 +119,6 @@ async function createTables() {
       FOREIGN KEY (from_user) REFERENCES users(username) ON DELETE CASCADE,
       FOREIGN KEY (to_user) REFERENCES users(username) ON DELETE CASCADE
     )`,
-    
     `CREATE TABLE IF NOT EXISTS ice_candidates (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       from_user VARCHAR(255) NOT NULL,
@@ -131,7 +128,6 @@ async function createTables() {
       FOREIGN KEY (from_user) REFERENCES users(username) ON DELETE CASCADE,
       FOREIGN KEY (to_user) REFERENCES users(username) ON DELETE CASCADE
     )`,
-    
     `CREATE TABLE IF NOT EXISTS two_factor_secrets (
       username VARCHAR(255) PRIMARY KEY,
       secret VARCHAR(255),
@@ -139,7 +135,7 @@ async function createTables() {
       FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE
     )`
   ];
-  
+
   if (config.storage.type === "sqlite") {
     for (const tableSql of tables) {
       db.run(tableSql);
@@ -157,13 +153,15 @@ async function createTables() {
 }
 
 function pbkdf2(password, salt) {
-  return crypto.pbkdf2Sync(
-    password,
-    salt,
-    config.security.pbkdf2.iterations,
-    config.security.pbkdf2.keylen,
-    config.security.pbkdf2.digest
-  ).toString("hex");
+  return crypto
+    .pbkdf2Sync(
+      password,
+      salt,
+      config.security.pbkdf2.iterations,
+      config.security.pbkdf2.keylen,
+      config.security.pbkdf2.digest
+    )
+    .toString("hex");
 }
 
 function sha256(str) {
@@ -172,12 +170,18 @@ function sha256(str) {
 
 async function query(sql, params = []) {
   if (config.storage.type === "sqlite") {
-    return db.exec(sql, params);
+    const stmt = db.prepare(sql);
+    stmt.bind(params);
+    const rows = [];
+    while (stmt.step()) rows.push(stmt.getAsObject());
+    const modified = db.getRowsModified();
+    stmt.free();
+    return { rows, affectedRows: modified };
   } else if (config.storage.type === "mysql") {
     const connection = await pool.getConnection();
     try {
-      const [rows] = await connection.execute(sql, params);
-      return rows;
+      const [rows, fields] = await connection.execute(sql, params);
+      return { rows, affectedRows: rows.affectedRows || rows.length || 0 };
     } finally {
       connection.release();
     }
@@ -185,37 +189,30 @@ async function query(sql, params = []) {
 }
 
 async function queryOne(sql, params = []) {
-  if (config.storage.type === "sqlite") {
-    const result = db.exec(sql, params);
-    return result[0]?.values[0] || null;
-  } else if (config.storage.type === "mysql") {
-    const connection = await pool.getConnection();
-    try {
-      const [rows] = await connection.execute(sql, params);
-      return rows[0] || null;
-    } finally {
-      connection.release();
-    }
-  }
+  const result = await query(sql, params);
+  return result.rows[0] || null;
 }
 
 export async function registerUser(username, passwordPlain) {
   const existingUser = await queryOne("SELECT username FROM users WHERE username = ?", [username]);
   if (existingUser) return false;
-  
+
   const salt = crypto.randomBytes(16).toString("hex");
   const passwordHash = pbkdf2(passwordPlain, salt);
-  
-  await query("INSERT INTO users (username, password_hash, salt) VALUES (?, ?, ?)", 
-    [username, passwordHash, salt]);
-  
+
+  await query("INSERT INTO users (username, password_hash, salt) VALUES (?, ?, ?)", [
+    username,
+    passwordHash,
+    salt,
+  ]);
+
   return true;
 }
 
 export async function authenticate(username, passwordPlain) {
   const user = await queryOne("SELECT * FROM users WHERE username = ?", [username]);
   if (!user) return null;
-  
+
   let isValid;
   if (user.salt) {
     const check = pbkdf2(passwordPlain, user.salt);
@@ -224,32 +221,38 @@ export async function authenticate(username, passwordPlain) {
     const check = sha256(passwordPlain);
     isValid = check === user.password_hash;
   }
-  
+
   return isValid ? username : null;
 }
 
 export async function saveToken(username, token, expires) {
   await query("DELETE FROM tokens WHERE expires < ?", [Date.now()]);
-  
-  await query("INSERT INTO tokens (token, username, expires) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE expires = ?", 
-    [token, username, expires, expires]);
-  
+
+  if (config.storage.type === "sqlite") {
+    await query(
+      `INSERT INTO tokens (token, username, expires) VALUES (?, ?, ?) ON CONFLICT(token) DO UPDATE SET expires = excluded.expires`,
+      [token, username, expires]
+    );
+  } else {
+    await query(
+      `INSERT INTO tokens (token, username, expires) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE expires = ?`,
+      [token, username, expires, expires]
+    );
+  }
+
   return true;
 }
 
 export async function validateToken(token) {
   await query("DELETE FROM tokens WHERE expires < ?", [Date.now()]);
-  
   const result = await queryOne("SELECT username FROM tokens WHERE token = ?", [token]);
   return result ? result.username : null;
 }
 
 export async function saveMessage(msg) {
   msg.id = crypto.randomBytes(16).toString("hex");
-  
   await query(
-    `INSERT INTO messages (id, channel, from_user, text, ts, reply_to, file_attachment, voice_attachment) 
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO messages (id, channel, from_user, text, ts, reply_to, file_attachment, voice_attachment) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       msg.id,
       msg.channel,
@@ -258,36 +261,35 @@ export async function saveMessage(msg) {
       msg.ts,
       msg.replyTo || null,
       msg.file ? JSON.stringify(msg.file) : null,
-      msg.voice ? JSON.stringify(msg.voice) : null
+      msg.voice ? JSON.stringify(msg.voice) : null,
     ]
   );
-  
   return msg;
 }
 
 export async function getMessages(channel, limit, before) {
   let sql = `SELECT * FROM messages WHERE channel = ?`;
   const params = [channel];
-  
   if (before) {
     sql += " AND ts < ?";
     params.push(before);
   }
-  
   sql += " ORDER BY ts DESC LIMIT ?";
   params.push(limit);
-  
-  const messages = await query(sql, params);
-  return messages.map(msg => ({
-    id: msg.id,
-    from: msg.from_user,
-    channel: msg.channel,
-    text: msg.text,
-    ts: msg.ts,
-    replyTo: msg.reply_to,
-    file: msg.file_attachment ? JSON.parse(msg.file_attachment) : null,
-    voice: msg.voice_attachment ? JSON.parse(msg.voice_attachment) : null
-  })).reverse();
+
+  const result = await query(sql, params);
+  return result.rows
+    .map((msg) => ({
+      id: msg.id,
+      from: msg.from_user,
+      channel: msg.channel,
+      text: msg.text,
+      ts: msg.ts,
+      replyTo: msg.reply_to,
+      file: msg.file_attachment ? JSON.parse(msg.file_attachment) : null,
+      voice: msg.voice_attachment ? JSON.parse(msg.voice_attachment) : null,
+    }))
+    .reverse();
 }
 
 export async function createChannel(channelName, creator) {
@@ -304,25 +306,29 @@ export async function createChannel(channelName, creator) {
 }
 
 export async function getChannels(username) {
-  const channels = await query(
-    `SELECT c.* FROM channels c 
-     JOIN channel_members cm ON c.name = cm.channel 
-     WHERE cm.username = ?`,
+  const result = await query(
+    `SELECT c.* FROM channels c JOIN channel_members cm ON c.name = cm.channel WHERE cm.username = ?`,
     [username]
   );
-  
-  return channels;
+  return result.rows;
 }
 
 export async function joinChannel(channel, username) {
   const channelExists = await queryOne("SELECT name FROM channels WHERE name = ?", [channel]);
   if (!channelExists) return false;
-  
+
   try {
-    await query(
-      "INSERT INTO channel_members (channel, username) VALUES (?, ?) ON DUPLICATE KEY UPDATE joined_at = CURRENT_TIMESTAMP",
-      [channel, username]
-    );
+    if (config.storage.type === "sqlite") {
+      await query(
+        `INSERT INTO channel_members (channel, username) VALUES (?, ?) ON CONFLICT(channel, username) DO UPDATE SET joined_at = CURRENT_TIMESTAMP`,
+        [channel, username]
+      );
+    } else {
+      await query(
+        `INSERT INTO channel_members (channel, username) VALUES (?, ?) ON DUPLICATE KEY UPDATE joined_at = CURRENT_TIMESTAMP`,
+        [channel, username]
+      );
+    }
     return true;
   } catch (error) {
     return false;
@@ -334,21 +340,12 @@ export async function leaveChannel(channel, username) {
     "DELETE FROM channel_members WHERE channel = ? AND username = ?",
     [channel, username]
   );
-  
-  if (config.storage.type === "sqlite") {
-    return result.affectedRows > 0;
-  } else {
-    return result.affectedRows > 0;
-  }
+  return result.affectedRows > 0;
 }
 
 export async function getChannelMembers(channel) {
-  const members = await query(
-    "SELECT username FROM channel_members WHERE channel = ?",
-    [channel]
-  );
-  
-  return members.map(m => m.username);
+  const result = await query("SELECT username FROM channel_members WHERE channel = ?", [channel]);
+  return result.rows.map((m) => m.username);
 }
 
 export async function isChannelMember(channel, username) {
@@ -356,13 +353,11 @@ export async function isChannelMember(channel, username) {
     "SELECT 1 FROM channel_members WHERE channel = ? AND username = ?",
     [channel, username]
   );
-  
   return !!result;
 }
 
 export async function saveWebRTCOffer(fromUser, toUser, offer, channel) {
   await query("DELETE FROM webrtc_offers WHERE timestamp < ?", [Date.now() - 300000]);
-  
   await query(
     "INSERT INTO webrtc_offers (from_user, to_user, offer, channel, timestamp) VALUES (?, ?, ?, ?, ?)",
     [fromUser, toUser, JSON.stringify(offer), channel, Date.now()]
@@ -371,26 +366,22 @@ export async function saveWebRTCOffer(fromUser, toUser, offer, channel) {
 
 export async function getWebRTCOffer(fromUser, toUser) {
   await query("DELETE FROM webrtc_offers WHERE timestamp < ?", [Date.now() - 300000]);
-  
   const result = await queryOne(
     "SELECT * FROM webrtc_offers WHERE from_user = ? AND to_user = ? ORDER BY timestamp DESC LIMIT 1",
     [fromUser, toUser]
   );
-  
   if (!result) return null;
-  
   return {
     fromUser: result.from_user,
     toUser: result.to_user,
     offer: JSON.parse(result.offer),
     channel: result.channel,
-    timestamp: result.timestamp
+    timestamp: result.timestamp,
   };
 }
 
 export async function saveWebRTCAnswer(fromUser, toUser, answer) {
   await query("DELETE FROM webrtc_answers WHERE timestamp < ?", [Date.now() - 300000]);
-  
   await query(
     "INSERT INTO webrtc_answers (from_user, to_user, answer, timestamp) VALUES (?, ?, ?, ?)",
     [fromUser, toUser, JSON.stringify(answer), Date.now()]
@@ -399,25 +390,21 @@ export async function saveWebRTCAnswer(fromUser, toUser, answer) {
 
 export async function getWebRTCAnswer(fromUser, toUser) {
   await query("DELETE FROM webrtc_answers WHERE timestamp < ?", [Date.now() - 300000]);
-  
   const result = await queryOne(
     "SELECT * FROM webrtc_answers WHERE from_user = ? AND to_user = ? ORDER BY timestamp DESC LIMIT 1",
     [fromUser, toUser]
   );
-  
   if (!result) return null;
-  
   return {
     fromUser: result.from_user,
     toUser: result.to_user,
     answer: JSON.parse(result.answer),
-    timestamp: result.timestamp
+    timestamp: result.timestamp,
   };
 }
 
 export async function saveICECandidate(fromUser, toUser, candidate) {
   await query("DELETE FROM ice_candidates WHERE timestamp < ?", [Date.now() - 300000]);
-  
   await query(
     "INSERT INTO ice_candidates (from_user, to_user, candidate, timestamp) VALUES (?, ?, ?, ?)",
     [fromUser, toUser, JSON.stringify(candidate), Date.now()]
@@ -426,31 +413,24 @@ export async function saveICECandidate(fromUser, toUser, candidate) {
 
 export async function getICECandidates(fromUser, toUser) {
   await query("DELETE FROM ice_candidates WHERE timestamp < ?", [Date.now() - 300000]);
-  
-  const candidates = await query(
+  const result = await query(
     "SELECT candidate FROM ice_candidates WHERE from_user = ? AND to_user = ? ORDER BY timestamp ASC",
     [fromUser, toUser]
   );
-  
-  return candidates.map(c => JSON.parse(c.candidate));
+  return result.rows.map((c) => JSON.parse(c.candidate));
 }
 
 export async function updateUserAvatar(username, avatarFilename) {
-  const result = await query(
-    "UPDATE users SET avatar = ? WHERE username = ?",
-    [avatarFilename, username]
-  );
-  
-  if (config.storage.type === "sqlite") {
-    return result.affectedRows > 0;
-  } else {
-    return result.affectedRows > 0;
-  }
+  const result = await query("UPDATE users SET avatar = ? WHERE username = ?", [
+    avatarFilename,
+    username,
+  ]);
+  return result.affectedRows > 0;
 }
 
 export async function getUsers() {
-  const users = await query("SELECT username, avatar FROM users");
-  return users;
+  const result = await query("SELECT username, avatar FROM users");
+  return result.rows;
 }
 
 export async function isTwoFactorEnabled(username) {
@@ -459,32 +439,35 @@ export async function isTwoFactorEnabled(username) {
 }
 
 export async function getTwoFactorSecret(username) {
-  const secret = await queryOne("SELECT secret FROM two_factor_secrets WHERE username = ?", [username]);
+  const secret = await queryOne("SELECT secret FROM two_factor_secrets WHERE username = ?", [
+    username,
+  ]);
   return secret ? secret.secret : null;
 }
 
 export async function setTwoFactorSecret(username, secret) {
-  await query(
-    `INSERT INTO two_factor_secrets (username, secret) VALUES (?, ?) 
-     ON DUPLICATE KEY UPDATE secret = ?`,
-    [username, secret, secret]
-  );
-}
-
-export async function enableTwoFactor(username, enabled) {
-  const result = await query(
-    "UPDATE users SET two_factor_enabled = ? WHERE username = ?",
-    [enabled, username]
-  );
-  
   if (config.storage.type === "sqlite") {
-    return result.affectedRows > 0;
+    await query(
+      `INSERT INTO two_factor_secrets (username, secret) VALUES (?, ?) ON CONFLICT(username) DO UPDATE SET secret = excluded.secret`,
+      [username, secret]
+    );
   } else {
-    return result.affectedRows > 0;
+    await query(
+      `INSERT INTO two_factor_secrets (username, secret) VALUES (?, ?) ON DUPLICATE KEY UPDATE secret = ?`,
+      [username, secret, secret]
+    );
   }
 }
 
-initDatabase().catch(error => {
+export async function enableTwoFactor(username, enabled) {
+  const result = await query("UPDATE users SET two_factor_enabled = ? WHERE username = ?", [
+    enabled,
+    username,
+  ]);
+  return result.affectedRows > 0;
+}
+
+initDatabase().catch((error) => {
   console.error("Failed to initialize database:", error);
   process.exit(1);
 });

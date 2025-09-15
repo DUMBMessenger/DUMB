@@ -30,9 +30,7 @@ const createUploader = (isAvatar = false) => multer({
     storage: multer.diskStorage({
         destination: config.uploads.dir,
         filename: (req, file, cb) => {
-            const uniqueName = crypto.randomBytes(16).toString('hex');
-            const extension = path.extname(file.originalname);
-            cb(null, isAvatar ? `avatar_${uniqueName}${extension}` : `${uniqueName}${extension}`);
+            cb(null, file.originalname);
         }
     }),
     limits: { fileSize: config.uploads.maxFileSize },
@@ -53,6 +51,8 @@ const sseClients = new Set();
 
 const genToken = () => crypto.randomBytes(32).toString("hex");
 
+const pending2FASessions = new Map();
+
 const authMiddleware = async (req, res, next) => {
     const auth = req.headers.authorization?.split(" ") || [];
     if (auth.length !== 2 || auth[0] !== "Bearer") {
@@ -71,8 +71,22 @@ const authMiddleware = async (req, res, next) => {
     next();
 };
 
-const channelAuthMiddleware = async (req, res, next) => {
+const require2FAMiddleware = async (req, res, next) => {
     await authMiddleware(req, res, async () => {
+        const twoFactorEnabled = await storage.isTwoFactorEnabled(req.user);
+        if (twoFactorEnabled) {
+            const session = pending2FASessions.get(req.user);
+            if (!session || !session.twoFactorVerified) {
+                logger.warn("2FA verification required", { username: req.user, ip: req.ip });
+                return res.status(403).json({ error: "2fa_required", message: "Two-factor authentication required" });
+            }
+        }
+        next();
+    });
+};
+
+const channelAuthMiddleware = async (req, res, next) => {
+    await require2FAMiddleware(req, res, async () => {
         const channel = req.body?.channel || req.query?.channel;
         if (channel && !await storage.isChannelMember(channel, req.user)) {
             logger.warn("Channel access denied", { username: req.user, channel, ip: req.ip });
@@ -180,9 +194,24 @@ const actionHandlers = {
         }
 
         const twoFactorEnabled = await storage.isTwoFactorEnabled(username);
+        
         if (twoFactorEnabled) {
             if (!twoFactorToken) {
-                return { success: false, requires2FA: true };
+                const sessionId = crypto.randomBytes(16).toString("hex");
+                pending2FASessions.set(username, {
+                    sessionId,
+                    username,
+                    twoFactorVerified: false,
+                    createdAt: Date.now()
+                });
+                
+                logger.info("2FA required for login", { username, sessionId });
+                return { 
+                    success: false, 
+                    requires2FA: true,
+                    sessionId,
+                    message: "Two-factor authentication required" 
+                };
             }
 
             const secret = await storage.getTwoFactorSecret(username);
@@ -197,12 +226,67 @@ const actionHandlers = {
                 logger.warn("2FA verification failed", { username });
                 return { error: "invalid 2fa token" };
             }
+
+            const session = pending2FASessions.get(username);
+            if (session) {
+                session.twoFactorVerified = true;
+                pending2FASessions.set(username, session);
+            }
         }
 
         const token = genToken();
         await storage.saveToken(username, token, Date.now() + config.security.tokenTTL);
+        
+        pending2FASessions.delete(username);
+        
         logger.info("User logged in successfully", { username, twoFactorEnabled });
         return { success: true, token, twoFactorEnabled };
+    },
+
+    verify2FALogin: async ({ username, sessionId, twoFactorToken }, user) => {
+        if (!username || !sessionId || !twoFactorToken) {
+            logger.warn("2FA verification failed: missing parameters", { username });
+            return { error: "missing parameters" };
+        }
+
+        const session = pending2FASessions.get(username);
+        if (!session || session.sessionId !== sessionId) {
+            logger.warn("2FA verification failed: invalid session", { username, sessionId });
+            return { error: "invalid session" };
+        }
+
+        if (Date.now() - session.createdAt > 5 * 60 * 1000) {
+            pending2FASessions.delete(username);
+            logger.warn("2FA verification failed: session expired", { username });
+            return { error: "session expired" };
+        }
+
+        const secret = await storage.getTwoFactorSecret(username);
+        const verified = speakeasy.totp.verify({
+            secret: secret,
+            encoding: 'base32',
+            token: twoFactorToken,
+            window: 1
+        });
+
+        if (!verified) {
+            logger.warn("2FA verification failed: invalid token", { username });
+            return { error: "invalid 2fa token" };
+        }
+
+        session.twoFactorVerified = true;
+        pending2FASessions.set(username, session);
+
+        const token = genToken();
+        await storage.saveToken(username, token, Date.now() + config.security.tokenTTL);
+        
+        logger.info("2FA login verified successfully", { username });
+        return { 
+            success: true, 
+            token, 
+            twoFactorEnabled: true,
+            message: "Two-factor authentication successful" 
+        };
     },
 
     setupTwoFactor: async (payload, user) => {
@@ -605,27 +689,28 @@ const createEndpoint = (method, path, middleware, action, paramMap = null) => {
 
 createEndpoint('post', '/api/register', limiter(), 'register');
 createEndpoint('post', '/api/login', limiter(), 'login');
-createEndpoint('post', '/api/2fa/setup', authMiddleware, 'setupTwoFactor');
-createEndpoint('post', '/api/2fa/verify', authMiddleware, 'verifyTwoFactor');
-createEndpoint('post', '/api/2fa/disable', authMiddleware, 'disableTwoFactor');
-createEndpoint('get', '/api/updates/check', authMiddleware, 'checkUpdates');
+createEndpoint('post', '/api/2fa/verify-login', limiter(), 'verify2FALogin');
+createEndpoint('post', '/api/2fa/setup', require2FAMiddleware, 'setupTwoFactor');
+createEndpoint('post', '/api/2fa/verify', require2FAMiddleware, 'verifyTwoFactor');
+createEndpoint('post', '/api/2fa/disable', require2FAMiddleware, 'disableTwoFactor');
+createEndpoint('get', '/api/updates/check', require2FAMiddleware, 'checkUpdates');
 createEndpoint('post', '/api/message', channelAuthMiddleware, 'sendMessage');
 createEndpoint('get', '/api/messages', channelAuthMiddleware, 'getMessages', req => req.query);
-createEndpoint('post', '/api/channels/create', authMiddleware, 'createChannel');
-createEndpoint('get', '/api/channels', authMiddleware, 'getChannels');
-createEndpoint('post', '/api/channels/join', authMiddleware, 'joinChannel');
-createEndpoint('post', '/api/channels/leave', authMiddleware, 'leaveChannel');
+createEndpoint('post', '/api/channels/create', require2FAMiddleware, 'createChannel');
+createEndpoint('get', '/api/channels', require2FAMiddleware, 'getChannels');
+createEndpoint('post', '/api/channels/join', require2FAMiddleware, 'joinChannel');
+createEndpoint('post', '/api/channels/leave', require2FAMiddleware, 'leaveChannel');
 createEndpoint('get', '/api/channels/members', channelAuthMiddleware, 'getChannelMembers', req => req.query);
-createEndpoint('post', '/api/webrtc/offer', authMiddleware, 'webrtc-offer');
-createEndpoint('post', '/api/webrtc/answer', authMiddleware, 'webrtc-answer');
-createEndpoint('post', '/api/webrtc/ice-candidate', authMiddleware, 'webrtc-ice-candidate');
-createEndpoint('get', '/api/webrtc/offer', authMiddleware, 'webrtc-get-offer', req => req.query);
-createEndpoint('get', '/api/webrtc/answer', authMiddleware, 'webrtc-get-answer', req => req.query);
-createEndpoint('get', '/api/webrtc/ice-candidates', authMiddleware, 'webrtc-get-ice-candidates', req => req.query);
-createEndpoint('post', '/api/webrtc/end-call', authMiddleware, 'webrtc-end-call');
-createEndpoint('post', '/api/voice/upload', authMiddleware, 'uploadVoiceMessage');
+createEndpoint('post', '/api/webrtc/offer', require2FAMiddleware, 'webrtc-offer');
+createEndpoint('post', '/api/webrtc/answer', require2FAMiddleware, 'webrtc-answer');
+createEndpoint('post', '/api/webrtc/ice-candidate', require2FAMiddleware, 'webrtc-ice-candidate');
+createEndpoint('get', '/api/webrtc/offer', require2FAMiddleware, 'webrtc-get-offer', req => req.query);
+createEndpoint('get', '/api/webrtc/answer', require2FAMiddleware, 'webrtc-get-answer', req => req.query);
+createEndpoint('get', '/api/webrtc/ice-candidates', require2FAMiddleware, 'webrtc-get-ice-candidates', req => req.query);
+createEndpoint('post', '/api/webrtc/end-call', require2FAMiddleware, 'webrtc-end-call');
+createEndpoint('post', '/api/voice/upload', require2FAMiddleware, 'uploadVoiceMessage');
 
-app.post("/api/upload/avatar", authMiddleware, avatarUpload.single("avatar"), async (req, res) => {
+app.post("/api/upload/avatar", require2FAMiddleware, avatarUpload.single("avatar"), async (req, res) => {
     if (!req.file) {
         logger.warn("Avatar upload failed: no file", { user: req.user });
         return res.status(400).json({ error: "invalid file" });
@@ -675,7 +760,7 @@ app.get("/api/user/:username/avatar", async (req, res) => {
     }
 });
 
-app.post("/api/upload/file", authMiddleware, fileUpload.single("file"), (req, res) => {
+app.post("/api/upload/file", require2FAMiddleware, fileUpload.single("file"), (req, res) => {
     if (!req.file) {
         logger.warn("File upload failed: no file", { user: req.user });
         return res.status(400).json({ error: "invalid file" });
@@ -702,7 +787,7 @@ app.post("/api/upload/file", authMiddleware, fileUpload.single("file"), (req, re
     });
 });
 
-app.post("/api/upload/voice/:voiceId", authMiddleware, (req, res) => {
+app.post("/api/upload/voice/:voiceId", require2FAMiddleware, (req, res) => {
     const voiceId = req.params.voiceId;
     const filePath = path.join(config.uploads.dir, voiceId);
     
@@ -743,6 +828,16 @@ app.get("/api/download/:filename", (req, res) => {
         res.status(404).json({ error: "file not found" });
     }
 });
+
+setInterval(() => {
+    const now = Date.now();
+    for (const [username, session] of pending2FASessions.entries()) {
+        if (now - session.createdAt > 5 * 60 * 1000) {
+            pending2FASessions.delete(username);
+            logger.info("Expired 2FA session cleaned up", { username });
+        }
+    }
+}, 10 * 60 * 1000);
 
 if (config.features.ws) {
     const wss = new WebSocketServer({ noServer: true });
@@ -800,6 +895,15 @@ if (config.features.ws) {
             if (!user) {
                 logger.warn("WebSocket upgrade failed: invalid token", { ip: req.socket.remoteAddress });
                 return socket.destroy();
+            }
+
+            const twoFactorEnabled = await storage.isTwoFactorEnabled(user);
+            if (twoFactorEnabled) {
+                const session = pending2FASessions.get(user);
+                if (!session || !session.twoFactorVerified) {
+                    logger.warn("WebSocket upgrade failed: 2FA required", { user, ip: req.socket.remoteAddress });
+                    return socket.destroy();
+                }
             }
 
             wss.handleUpgrade(req, socket, head, ws => {
