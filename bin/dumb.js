@@ -170,6 +170,8 @@ async function runInstaller() {
         mysql2: "^3.9.7",
         multer: "^1.4.4",
         cors: "^2.8.5"
+        qrcode: "^1.5.4"
+        speakeasy: "^2.0.0"
       }
     };
     
@@ -178,27 +180,13 @@ async function runInstaller() {
       JSON.stringify(packageJson, null, 2)
     );
 
-    execSync("npm install", { cwd: projectPath, stdio: "inherit" });
+    console.log(gradient("gray", "white")("DUMB Installation complete!"));
 
+    execSync("npm install", { cwd: projectPath, stdio: "inherit" });
     console.log("🧹 Cleaning up...");
     execSync("rm -rf temp_repo", { stdio: "inherit" });
 
-    console.log.multiline([
-      "\n✅ Installation complete!",
-      "──────────────────────────────",
-      `📁 Folder: ${answers.folder}`,
-      `🌐 Port: ${answers.port}`,
-      `🗄️  Database: ${answers.dbType}`,
-      `🔌 WebSocket: ${answers.websocket}`,
-      `📡 SSE: ${answers.sse}`,
-      `📞 VoIP: ${answers.voip}`,
-      `📁 Uploads: ${answers.uploads}`,
-      "──────────────────────────────",
-      "🚀 To start the server:",
-      `   cd ${answers.folder}`,
-      "   npm start",
-      "──────────────────────────────\n"
-    ]);
+    console.log("
 
   } catch (err) {
     console.error("❌ Installation failed:", err);
