@@ -74,8 +74,10 @@ async function createTables() {
       FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE
     )`,
     `CREATE TABLE IF NOT EXISTS channels (
-      name VARCHAR(255) PRIMARY KEY,
+      id VARCHAR(255) PRIMARY KEY,
+      name VARCHAR(255) NOT NULL,
       creator VARCHAR(255) NOT NULL,
+      custom_id BOOLEAN DEFAULT FALSE,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (creator) REFERENCES users(username) ON DELETE CASCADE
     )`,
@@ -84,7 +86,7 @@ async function createTables() {
       username VARCHAR(255) NOT NULL,
       joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (channel, username),
-      FOREIGN KEY (channel) REFERENCES channels(name) ON DELETE CASCADE,
+      FOREIGN KEY (channel) REFERENCES channels(id) ON DELETE CASCADE,
       FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE
     )`,
     `CREATE TABLE IF NOT EXISTS messages (
@@ -97,7 +99,7 @@ async function createTables() {
       file_attachment TEXT,
       voice_attachment TEXT,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (channel) REFERENCES channels(name) ON DELETE CASCADE,
+      FOREIGN KEY (channel) REFERENCES channels(id) ON DELETE CASCADE,
       FOREIGN KEY (from_user) REFERENCES users(username) ON DELETE CASCADE
     )`,
     `CREATE TABLE IF NOT EXISTS webrtc_offers (
@@ -292,11 +294,14 @@ export async function getMessages(channel, limit, before) {
     .reverse();
 }
 
-export async function createChannel(channelName, creator) {
+export async function createChannel(channelName, creator, customId = null) {
+  const channelId = customId || sha256(channelName + Date.now());
+  
   try {
-    await query("INSERT INTO channels (name, creator) VALUES (?, ?)", [channelName, creator]);
-    await joinChannel(channelName, creator);
-    return true;
+    await query("INSERT INTO channels (id, name, creator, custom_id) VALUES (?, ?, ?, ?)", 
+      [channelId, channelName, creator, !!customId]);
+    await joinChannel(channelId, creator);
+    return channelId;
   } catch (error) {
     if (error.message.includes("UNIQUE constraint failed") || error.code === "ER_DUP_ENTRY") {
       return false;
@@ -307,14 +312,14 @@ export async function createChannel(channelName, creator) {
 
 export async function getChannels(username) {
   const result = await query(
-    `SELECT c.* FROM channels c JOIN channel_members cm ON c.name = cm.channel WHERE cm.username = ?`,
+    `SELECT c.* FROM channels c JOIN channel_members cm ON c.id = cm.channel WHERE cm.username = ?`,
     [username]
   );
   return result.rows;
 }
 
 export async function joinChannel(channel, username) {
-  const channelExists = await queryOne("SELECT name FROM channels WHERE name = ?", [channel]);
+  const channelExists = await queryOne("SELECT id FROM channels WHERE id = ?", [channel]);
   if (!channelExists) return false;
 
   try {

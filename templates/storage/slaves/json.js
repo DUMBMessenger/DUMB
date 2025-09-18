@@ -98,21 +98,31 @@ export function getMessages(channel, limit, before) {
   return msgs.slice(0, limit).reverse();
 }
 
-export function createChannel(channelName, creator) {
-  if (db.channels.find(c => c.name === channelName)) return false;
-  db.channels.push({ name: channelName, creator, createdAt: Date.now() });
-  joinChannel(channelName, creator);
-  return true;
+export function createChannel(channelName, creator, customId = null) {
+  const channelId = customId || sha256(channelName + Date.now());
+  
+  if (db.channels.find(c => c.id === channelId || c.name === channelName)) return false;
+  
+  db.channels.push({ 
+    id: channelId, 
+    name: channelName, 
+    creator, 
+    createdAt: Date.now(),
+    customId: !!customId
+  });
+  
+  joinChannel(channelId, creator);
+  return channelId;
 }
 
 export function getChannels(username) {
   return db.channels.filter(c => 
-    db.channelMembers.some(cm => cm.channel === c.name && cm.username === username)
+    db.channelMembers.some(cm => cm.channel === c.id && cm.username === username)
   );
 }
 
 export function joinChannel(channel, username) {
-  if (!db.channels.find(c => c.name === channel)) return false;
+  if (!db.channels.find(c => c.id === channel)) return false;
   if (db.channelMembers.find(cm => cm.channel === channel && cm.username === username)) return true;
   db.channelMembers.push({ channel, username, joinedAt: Date.now() });
   save();
