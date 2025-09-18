@@ -280,23 +280,13 @@ const actionHandlers = {
         const token = genToken();
         await storage.saveToken(username, token, Date.now() + config.security.tokenTTL);
         
-        logger.info("2FA login verified successfully", { username });
-        return { 
-            success: true, 
-            token, 
-            twoFactorEnabled: true,
-            message: "Two-factor authentication successful" 
-        };
+        logger.info("2FA verification successful", { username });
+        return { success: true, token };
     },
 
-    setupTwoFactor: async (payload, user) => {
-        if (!user) {
-            logger.warn("2FA setup failed: not authenticated");
-            return { error: "not auth" };
-        }
-
+    setup2FA: async (data, user) => {
         const secret = speakeasy.generateSecret({
-            name: `ChatApp:${user}`,
+            name: `ChatApp (${user})`,
             issuer: "ChatApp"
         });
 
@@ -304,17 +294,22 @@ const actionHandlers = {
         
         const qrCodeUrl = await QRCode.toDataURL(secret.otpauth_url);
         
-        logger.info("2FA setup initiated", { user });
-        return { success: true, secret: secret.base32, qrCodeUrl };
+        logger.info("2FA setup initiated", { username: user });
+        return { 
+            success: true, 
+            secret: secret.base32,
+            qrCodeUrl,
+            manualEntryCode: secret.otpauth_url 
+        };
     },
 
-    verifyTwoFactor: async ({ token }, user) => {
-        if (!user) {
-            logger.warn("2FA verification failed: not authenticated");
-            return { error: "not auth" };
+    enable2FA: async ({ token }, user) => {
+        const secret = await storage.getTwoFactorSecret(user);
+        if (!secret) {
+            logger.warn("2FA enable failed: no secret found", { username: user });
+            return { error: "setup required" };
         }
 
-        const secret = await storage.getTwoFactorSecret(user);
         const verified = speakeasy.totp.verify({
             secret: secret,
             encoding: 'base32',
@@ -322,511 +317,407 @@ const actionHandlers = {
             window: 1
         });
 
-        if (verified) {
-            await storage.enableTwoFactor(user, true);
-            logger.info("2FA enabled successfully", { user });
-            return { success: true };
-        } else {
-            logger.warn("2FA verification failed", { user });
+        if (!verified) {
+            logger.warn("2FA enable failed: invalid token", { username: user });
             return { error: "invalid token" };
         }
+
+        await storage.enableTwoFactor(user, true);
+        logger.info("2FA enabled successfully", { username: user });
+        return { success: true };
     },
 
-    disableTwoFactor: async ({ password }, user) => {
-        if (!user) {
-            logger.warn("2FA disable failed: not authenticated");
-            return { error: "not auth" };
+    disable2FA: async ({ token }, user) => {
+        const secret = await storage.getTwoFactorSecret(user);
+        if (!secret) {
+            logger.warn("2FA disable failed: not enabled", { username: user });
+            return { error: "not enabled" };
         }
 
-        const authenticated = await storage.authenticate(user, password);
-        if (!authenticated) {
-            logger.warn("2FA disable failed: invalid password", { user });
-            return { error: "invalid password" };
+        const verified = speakeasy.totp.verify({
+            secret: secret,
+            encoding: 'base32',
+            token: token,
+            window: 1
+        });
+
+        if (!verified) {
+            logger.warn("2FA disable failed: invalid token", { username: user });
+            return { error: "invalid token" };
         }
 
         await storage.enableTwoFactor(user, false);
         await storage.setTwoFactorSecret(user, null);
-        
-        logger.info("2FA disabled successfully", { user });
+        logger.info("2FA disabled successfully", { username: user });
         return { success: true };
     },
 
-    checkUpdates: async (payload, user) => {
-        if (!user) {
-            logger.warn("Update check failed: not authenticated");
-            return { error: "not auth" };
-        }
-
-        const updateInfo = await checkGitHubUpdates();
-        
-        if (updateInfo) {
-            logger.info("Update check completed", { user, hasUpdates: true });
-            return { 
-                success: true, 
-                hasUpdates: true, 
-                updateInfo 
-            };
-        } else {
-            logger.info("Update check completed", { user, hasUpdates: false });
-            return { 
-                success: true, 
-                hasUpdates: false 
-            };
-        }
+    get2FAStatus: async (data, user) => {
+        const enabled = await storage.isTwoFactorEnabled(user);
+        return { enabled };
     },
 
-    sendMessage: async ({ channel, text, replyTo, fileId, voiceMessage }, user) => {
-        if (!user || typeof channel !== "string" || typeof text !== "string") {
-            logger.warn("Send message failed: bad input", { user, channel, textLength: text?.length });
-            return { error: "bad input" };
-        }
-        if (!await storage.isChannelMember(channel, user)) {
-            logger.warn("Send message failed: not channel member", { user, channel });
-            return { error: "not a channel member" };
-        }
-
-        let fileAttachment = null;
-        if (fileId) {
-            fileAttachment = {
-                filename: fileId,
-                originalName: fileId,
-                mimetype: "application/octet-stream", 
-                size: 0,
-                downloadUrl: `/api/download/${fileId}`
-            };
-        }
-
-        let voiceAttachment = null;
-        if (voiceMessage) {
-            voiceAttachment = {
-                filename: voiceMessage,
-                duration: 0,
-                downloadUrl: `/api/download/${voiceMessage}`
-            };
-        }
-
-        const msg = await storage.saveMessage({
-            from: user,
-            channel: channel.trim(),
-            text: text.slice(0, config.security.maxMessageLength),
-            ts: Date.now(),
-            replyTo: replyTo || null,
-            file: fileAttachment,
-            voice: voiceAttachment
-        });
-
-        const messageData = JSON.stringify({ type: "message", msg });
-        [...wsClients].filter(ws => ws.readyState === 1).forEach(ws => {
-            try { ws.send(messageData); } catch {}
-        });
-        [...sseClients].forEach(res => {
-            try { res.write(`data: ${messageData}\n\n`); } catch {}
-        });
-
-        logger.info("Message sent", { user, channel, messageId: msg.id, hasFile: !!fileId, hasVoice: !!voiceMessage });
-        return { success: true, message: msg };
-    },
-
-    getMessages: async ({ channel, limit = 100, before }, user) => {
-        if (!user || !await storage.isChannelMember(channel, user)) {
-            logger.warn("Get messages failed: not authorized or not member", { user, channel });
-            return { error: "not auth or not member" };
-        }
-
-        const messages = await storage.getMessages(
-            channel,
-            Math.min(Math.max(parseInt(limit), 1), 500),
-            before ? parseInt(before) : null
-        );
-
-        logger.info("Messages retrieved", { user, channel, count: messages.length });
-        return { success: true, messages };
-    },
-
-    createChannel: async ({ channelName }, user) => {
-        if (!user || typeof channelName !== "string" || channelName.trim().length < 2) {
-            logger.warn("Create channel failed: invalid channel name", { user, channelName });
+    createChannel: async ({ name, customId }, user) => {
+        if (!name || typeof name !== "string") {
+            logger.warn("Channel creation failed: invalid name", { username: user });
             return { error: "invalid channel name" };
         }
 
-        const result = await storage.createChannel(channelName.trim(), user);
-        if (result) {
-            logger.info("Channel created", { user, channel: channelName.trim() });
-            return { success: true, channel: channelName.trim() };
-        } else {
-            logger.warn("Create channel failed: channel exists", { user, channel: channelName.trim() });
+        const channelId = await storage.createChannel(name.trim(), user, customId);
+        if (!channelId) {
+            logger.warn("Channel creation failed: already exists", { username: user, channelName: name });
             return { error: "channel exists" };
         }
+
+        logger.info("Channel created successfully", { username: user, channelName: name, channelId });
+        return { success: true, channelId };
     },
 
-    getChannels: async (payload, user) => {
-        if (!user) {
-            logger.warn("Get channels failed: not authenticated");
-            return { error: "not auth" };
-        }
+    getChannels: async (data, user) => {
         const channels = await storage.getChannels(user);
-        logger.info("Channels retrieved", { user, count: channels.length });
-        return { success: true, channels };
+        logger.info("Channels retrieved", { username: user, count: channels.length });
+        return { channels };
     },
 
     joinChannel: async ({ channel }, user) => {
-        if (!user || typeof channel !== "string") {
-            logger.warn("Join channel failed: invalid channel", { user, channel });
-            return { error: "invalid channel" };
+        if (!channel) {
+            logger.warn("Channel join failed: no channel specified", { username: user });
+            return { error: "channel required" };
         }
 
         const result = await storage.joinChannel(channel, user);
-        if (result) {
-            logger.info("User joined channel", { user, channel });
-            return { success: true };
-        } else {
-            logger.warn("Join channel failed: channel not found", { user, channel });
-            return { error: "channel not found" };
+        if (!result) {
+            logger.warn("Channel join failed: invalid channel", { username: user, channel });
+            return { error: "invalid channel" };
         }
+
+        logger.info("User joined channel", { username: user, channel });
+        return { success: true };
     },
 
     leaveChannel: async ({ channel }, user) => {
-        if (!user || typeof channel !== "string") {
-            logger.warn("Leave channel failed: invalid channel", { user, channel });
-            return { error: "invalid channel" };
+        if (!channel) {
+            logger.warn("Channel leave failed: no channel specified", { username: user });
+            return { error: "channel required" };
         }
 
         const result = await storage.leaveChannel(channel, user);
-        if (result) {
-            logger.info("User left channel", { user, channel });
-            return { success: true };
-        } else {
-            logger.warn("Leave channel failed: not a member", { user, channel });
+        if (!result) {
+            logger.warn("Channel leave failed: not a member", { username: user, channel });
             return { error: "not a member" };
         }
+
+        logger.info("User left channel", { username: user, channel });
+        return { success: true };
     },
 
     getChannelMembers: async ({ channel }, user) => {
-        if (!user || typeof channel !== "string") {
-            logger.warn("Get channel members failed: invalid channel", { user, channel });
-            return { error: "invalid channel" };
+        if (!channel) {
+            logger.warn("Channel members fetch failed: no channel specified", { username: user });
+            return { error: "channel required" };
         }
-        if (!await storage.isChannelMember(channel, user)) {
-            logger.warn("Get channel members failed: not a member", { user, channel });
-            return { error: "not a channel member" };
-        }
+
         const members = await storage.getChannelMembers(channel);
-        logger.info("Channel members retrieved", { user, channel, count: members.length });
-        return { success: true, members };
+        logger.info("Channel members retrieved", { username: user, channel, count: members.length });
+        return { members };
     },
 
-    "webrtc-offer": async ({ targetUser, offer, channel }, user) => {
-        if (!user || !targetUser || !offer) {
-            logger.warn("WebRTC offer failed: missing data", { user, targetUser });
-            return { error: "missing offer data" };
+    getMessages: async ({ channel, limit = 50, before }, user) => {
+        if (!channel) {
+            logger.warn("Messages fetch failed: no channel specified", { username: user });
+            return { error: "channel required" };
         }
-        await storage.saveWebRTCOffer(user, targetUser, offer, channel);
 
-        const offerData = JSON.stringify({
-            type: "webrtc-offer",
+        const messages = await storage.getMessages(channel, Math.min(limit, 100), before);
+        logger.info("Messages retrieved", { username: user, channel, count: messages.length });
+        return { messages };
+    },
+
+    sendMessage: async ({ channel, text, replyTo }, user) => {
+        if (!channel || !text || typeof text !== "string") {
+            logger.warn("Message send failed: invalid parameters", { username: user, channel });
+            return { error: "bad input" };
+        }
+
+        const msg = {
             from: user,
-            offer: offer,
-            channel: channel
+            channel: channel,
+            text: text.trim(),
+            ts: Date.now(),
+            replyTo: replyTo || null
+        };
+
+        const saved = await storage.saveMessage(msg);
+        
+        const messageToSend = {
+            ...saved,
+            type: "message",
+            action: "new"
+        };
+
+        wsClients.forEach(client => {
+            if (client.readyState === 1 && client.user === user) {
+                client.send(JSON.stringify(messageToSend));
+            }
         });
 
-        [...wsClients].filter(ws => ws.user === targetUser && ws.readyState === 1)
-            .forEach(ws => { try { ws.send(offerData); } catch {} });
+        sseClients.forEach(client => {
+            if (client.user === user) {
+                client.res.write(`data: ${JSON.stringify(messageToSend)}\n\n`);
+            }
+        });
 
-        logger.info("WebRTC offer sent", { from: user, to: targetUser, channel });
+        logger.info("Message sent", { username: user, channel, messageId: saved.id });
+        return { success: true, message: saved };
+    },
+
+    getUsers: async (data, user) => {
+        const users = await storage.getUsers();
+        logger.info("Users list retrieved", { username: user, count: users.length });
+        return { users };
+    },
+
+    uploadAvatar: async (req, user) => {
+        if (!req.file) {
+            logger.warn("Avatar upload failed: no file", { username: user });
+            return { error: "no file" };
+        }
+
+        const result = await storage.updateUserAvatar(user, req.file.filename);
+        if (!result) {
+            logger.warn("Avatar upload failed: user not found", { username: user });
+            return { error: "user not found" };
+        }
+
+        logger.info("Avatar uploaded successfully", { username: user, filename: req.file.filename });
+        return { success: true, filename: req.file.filename };
+    },
+
+    uploadFile: async (req, user) => {
+        if (!req.file) {
+            logger.warn("File upload failed: no file", { username: user });
+            return { error: "no file" };
+        }
+
+        const fileUrl = `${config.features.uploads ? config.uploads.urlBase : ''}/${req.file.filename}`;
+        logger.info("File uploaded successfully", { username: user, filename: req.file.filename });
+        return { success: true, filename: req.file.filename, url: fileUrl };
+    },
+
+    webrtcOffer: async ({ toUser, offer, channel }, user) => {
+        await storage.saveWebRTCOffer(user, toUser, offer, channel);
+        logger.info("WebRTC offer sent", { from: user, to: toUser, channel });
         return { success: true };
     },
 
-    "webrtc-answer": async ({ targetUser, answer }, user) => {
-        if (!user || !targetUser || !answer) {
-            logger.warn("WebRTC answer failed: missing data", { user, targetUser });
-            return { error: "missing answer data" };
-        }
-        await storage.saveWebRTCAnswer(user, targetUser, answer);
-
-        const answerData = JSON.stringify({
-            type: "webrtc-answer",
-            from: user,
-            answer: answer
-        });
-
-        [...wsClients].filter(ws => ws.user === targetUser && ws.readyState === 1)
-            .forEach(ws => { try { ws.send(answerData); } catch {} });
-
-        logger.info("WebRTC answer sent", { from: user, to: targetUser });
+    webrtcAnswer: async ({ toUser, answer }, user) => {
+        await storage.saveWebRTCAnswer(user, toUser, answer);
+        logger.info("WebRTC answer sent", { from: user, to: toUser });
         return { success: true };
     },
 
-    "webrtc-ice-candidate": async ({ targetUser, candidate }, user) => {
-        if (!user || !targetUser || !candidate) {
-            logger.warn("WebRTC ICE candidate failed: missing data", { user, targetUser });
-            return { error: "missing candidate data" };
-        }
-        await storage.saveICECandidate(user, targetUser, candidate);
-
-        const candidateData = JSON.stringify({
-            type: "webrtc-ice-candidate",
-            from: user,
-            candidate: candidate
-        });
-
-        [...wsClients].filter(ws => ws.user === targetUser && ws.readyState === 1)
-            .forEach(ws => { try { ws.send(candidateData); } catch {} });
-
-        logger.info("WebRTC ICE candidate sent", { from: user, to: targetUser });
+    iceCandidate: async ({ toUser, candidate }, user) => {
+        await storage.saveICECandidate(user, toUser, candidate);
+        logger.info("ICE candidate sent", { from: user, to: toUser });
         return { success: true };
     },
 
-    "webrtc-get-offer": async ({ fromUser }, user) => {
-        if (!user || !fromUser) {
-            logger.warn("WebRTC get offer failed: missing fromUser", { user, fromUser });
-            return { error: "missing fromUser" };
-        }
+    getWebRTCOffer: async ({ fromUser }, user) => {
         const offer = await storage.getWebRTCOffer(fromUser, user);
-        logger.info("WebRTC offer retrieved", { user, fromUser });
-        return { success: true, offer };
+        if (offer) {
+            logger.info("WebRTC offer retrieved", { from: fromUser, to: user });
+            return { success: true, offer: offer.offer, channel: offer.channel };
+        }
+        logger.info("No WebRTC offer found", { from: fromUser, to: user });
+        return { success: false };
     },
 
-    "webrtc-get-answer": async ({ fromUser }, user) => {
-        if (!user || !fromUser) {
-            logger.warn("WebRTC get answer failed: missing fromUser", { user, fromUser });
-            return { error: "missing fromUser" };
-        }
+    getWebRTCAnswer: async ({ fromUser }, user) => {
         const answer = await storage.getWebRTCAnswer(fromUser, user);
-        logger.info("WebRTC answer retrieved", { user, fromUser });
-        return { success: true, answer };
+        if (answer) {
+            logger.info("WebRTC answer retrieved", { from: fromUser, to: user });
+            return { success: true, answer: answer.answer };
+        }
+        logger.info("No WebRTC answer found", { from: fromUser, to: user });
+        return { success: false };
     },
 
-    "webrtc-get-ice-candidates": async ({ fromUser }, user) => {
-        if (!user || !fromUser) {
-            logger.warn("WebRTC get ICE candidates failed: missing fromUser", { user, fromUser });
-            return { error: "missing fromUser" };
-        }
+    getICECandidates: async ({ fromUser }, user) => {
         const candidates = await storage.getICECandidates(fromUser, user);
-        logger.info("WebRTC ICE candidates retrieved", { user, fromUser, count: candidates.length });
+        logger.info("ICE candidates retrieved", { from: fromUser, to: user, count: candidates.length });
         return { success: true, candidates };
     },
 
-    "webrtc-end-call": async ({ targetUser }, user) => {
-        if (!user || !targetUser) {
-            logger.warn("WebRTC end call failed: missing targetUser", { user, targetUser });
-            return { error: "missing targetUser" };
-        }
-        const endCallData = JSON.stringify({ type: "webrtc-end-call", from: user });
-
-        [...wsClients].filter(ws => ws.user === targetUser && ws.readyState === 1)
-            .forEach(ws => { try { ws.send(endCallData); } catch {} });
-
-        logger.info("WebRTC call ended", { from: user, to: targetUser });
-        return { success: true };
-    },
-
-    uploadVoiceMessage: async ({ channel, duration }, user) => {
-        if (!user || !channel) {
-            logger.warn("Voice message upload failed: missing parameters", { user, channel });
-            return { error: "missing parameters" };
-        }
-
-        const voiceId = crypto.randomBytes(16).toString("hex") + ".ogg";
-        logger.info("Voice message upload initiated", { user, channel, voiceId, duration });
-        return { success: true, voiceId, uploadUrl: `/api/upload/voice/${voiceId}` };
+    getUpdates: async (data, user) => {
+        const updateInfo = await checkGitHubUpdates();
+        return { 
+            success: true, 
+            updateAvailable: !!updateInfo,
+            updateInfo 
+        };
     }
 };
 
-app.post("/api/unified", limiter(), async (req, res) => {
-    const startTime = Date.now();
+app.post("/api/:action", limiter(), async (req, res) => {
+    const { action } = req.params;
+    const handler = actionHandlers[action];
+
+    if (!handler) {
+        logger.warn("Unknown API action", { action, ip: req.ip });
+        return res.status(404).json({ error: "unknown action" });
+    }
+
     try {
-        const token = req.headers.authorization?.split(" ")[1];
-        const user = token ? await storage.validateToken(token) : null;
-        const handler = actionHandlers[req.body.action];
+        let result;
+        if (action === "uploadAvatar" || action === "uploadFile") {
+            const uploadMiddleware = action === "uploadAvatar" ? avatarUpload.single("file") : fileUpload.single("file");
+            
+            uploadMiddleware(req, res, async (err) => {
+                if (err) {
+                    logger.error("Upload error", { error: err.message, action, ip: req.ip });
+                    return res.status(400).json({ error: "upload failed", details: err.message });
+                }
 
-        if (!handler) {
-            logger.warn("Unknown action requested", { action: req.body.action, ip: req.ip });
-            return res.json({ success: false, error: "unknown action" });
-        }
-
-        const result = await handler(req.body, user);
-        logger.info("Unified API request processed", {
-            action: req.body.action,
-            user: user,
-            success: result.success,
-            duration: Date.now() - startTime
-        });
-        res.json(result.success ? result : { success: false, ...result });
-    } catch (e) {
-        logger.error("Unified API error", { error: e.message, stack: e.stack, ip: req.ip });
-        res.json({ success: false, error: "server error" });
-    }
-});
-
-const createEndpoint = (method, path, middleware, action, paramMap = null) => {
-    app[method](path, middleware, async (req, res) => {
-        const startTime = Date.now();
-        try {
-            const params = paramMap ? paramMap(req) : req.method === 'GET' ? req.query : req.body;
-            const result = await actionHandlers[action](params, req.user);
-            logger.info("Endpoint request processed", {
-                method,
-                path,
-                action,
-                user: req.user,
-                success: result.success,
-                duration: Date.now() - startTime
+                try {
+                    if (action === "uploadAvatar") {
+                        await authMiddleware(req, res, async () => {
+                            result = await handler(req, req.user);
+                            res.json(result);
+                        });
+                    } else {
+                        await channelAuthMiddleware(req, res, async () => {
+                            result = await handler(req, req.user);
+                            res.json(result);
+                        });
+                    }
+                } catch (error) {
+                    logger.error("Handler error after upload", { error: error.message, action, ip: req.ip });
+                    res.status(500).json({ error: "internal error" });
+                }
             });
-            res.json(result.success ? result : { success: false, ...result });
-        } catch (e) {
-            logger.error("Endpoint error", {
-                method,
-                path,
-                action,
-                error: e.message,
-                stack: e.stack,
-                ip: req.ip
-            });
-            res.json({ success: false, error: "server error" });
+        } else {
+            if (action === "register") {
+                result = await handler(req.body);
+                res.json(result);
+            } else if (action === "login" || action === "verify2FALogin") {
+                result = await handler(req.body);
+                res.json(result);
+            } else {
+                await authMiddleware(req, res, async () => {
+                    if (action === "setup2FA" || action === "enable2FA" || action === "disable2FA" || action === "get2FAStatus") {
+                        result = await handler(req.body, req.user);
+                    } else {
+                        await require2FAMiddleware(req, res, async () => {
+                            result = await handler(req.body, req.user);
+                        });
+                    }
+                    res.json(result);
+                });
+            }
         }
-    });
-};
-
-createEndpoint('post', '/api/register', limiter(), 'register');
-createEndpoint('post', '/api/login', limiter(), 'login');
-createEndpoint('post', '/api/2fa/verify-login', limiter(), 'verify2FALogin');
-createEndpoint('post', '/api/2fa/setup', require2FAMiddleware, 'setupTwoFactor');
-createEndpoint('post', '/api/2fa/verify', require2FAMiddleware, 'verifyTwoFactor');
-createEndpoint('post', '/api/2fa/disable', require2FAMiddleware, 'disableTwoFactor');
-createEndpoint('get', '/api/updates/check', require2FAMiddleware, 'checkUpdates');
-createEndpoint('post', '/api/message', channelAuthMiddleware, 'sendMessage');
-createEndpoint('get', '/api/messages', channelAuthMiddleware, 'getMessages', req => req.query);
-createEndpoint('post', '/api/channels/create', require2FAMiddleware, 'createChannel');
-createEndpoint('get', '/api/channels', require2FAMiddleware, 'getChannels');
-createEndpoint('post', '/api/channels/join', require2FAMiddleware, 'joinChannel');
-createEndpoint('post', '/api/channels/leave', require2FAMiddleware, 'leaveChannel');
-createEndpoint('get', '/api/channels/members', channelAuthMiddleware, 'getChannelMembers', req => req.query);
-createEndpoint('post', '/api/webrtc/offer', require2FAMiddleware, 'webrtc-offer');
-createEndpoint('post', '/api/webrtc/answer', require2FAMiddleware, 'webrtc-answer');
-createEndpoint('post', '/api/webrtc/ice-candidate', require2FAMiddleware, 'webrtc-ice-candidate');
-createEndpoint('get', '/api/webrtc/offer', require2FAMiddleware, 'webrtc-get-offer', req => req.query);
-createEndpoint('get', '/api/webrtc/answer', require2FAMiddleware, 'webrtc-get-answer', req => req.query);
-createEndpoint('get', '/api/webrtc/ice-candidates', require2FAMiddleware, 'webrtc-get-ice-candidates', req => req.query);
-createEndpoint('post', '/api/webrtc/end-call', require2FAMiddleware, 'webrtc-end-call');
-createEndpoint('post', '/api/voice/upload', require2FAMiddleware, 'uploadVoiceMessage');
-
-app.post("/api/upload/avatar", require2FAMiddleware, avatarUpload.single("avatar"), async (req, res) => {
-    if (!req.file) {
-        logger.warn("Avatar upload failed: no file", { user: req.user });
-        return res.status(400).json({ error: "invalid file" });
-    }
-
-    const success = await storage.updateUserAvatar(req.user, req.file.filename);
-    if (!success) {
-        logger.error("Avatar upload failed: storage update failed", { user: req.user, filename: req.file.filename });
-        return res.status(500).json({ error: "failed to update avatar" });
-    }
-
-    const extension = path.extname(req.file.filename).toLowerCase();
-    let mimeType = 'image/jpeg';
-    if (extension === '.png') mimeType = 'image/png';
-    else if (extension === '.gif') mimeType = 'image/gif';
-    else if (extension === '.webp') mimeType = 'image/webp';
-
-    logger.info("Avatar uploaded successfully", { user: req.user, filename: req.file.filename });
-    res.json({
-        success: true,
-        file: req.file.filename,
-        avatarUrl: `/api/user/${req.user}/avatar`,
-        mimeType: mimeType
-    });
-});
-
-app.get("/api/user/:username/avatar", async (req, res) => {
-    try {
-        const users = await storage.getUsers();
-        const user = users.find(u => u.username === req.params.username);
-
-        if (!user?.avatar) {
-            logger.warn("Avatar not found", { username: req.params.username });
-            return res.status(404).json({ error: "avatar not found" });
-        }
-
-        if (!fs.existsSync(path.join(config.uploads.dir, user.avatar))) {
-            logger.warn("Avatar file not found", { username: req.params.username, avatar: user.avatar });
-            return res.status(404).json({ error: "avatar file not found" });
-        }
-
-        logger.info("Avatar served", { username: req.params.username });
-        res.sendFile(user.avatar, { root: config.uploads.dir });
     } catch (error) {
-        logger.error("Avatar serve error", { error: error.message, username: req.params.username });
-        res.status(500).json({ error: "server error" });
+        logger.error("API handler error", { error: error.message, action, ip: req.ip });
+        res.status(500).json({ error: "internal error" });
     }
 });
 
-app.post("/api/upload/file", require2FAMiddleware, fileUpload.single("file"), (req, res) => {
-    if (!req.file) {
-        logger.warn("File upload failed: no file", { user: req.user });
-        return res.status(400).json({ error: "invalid file" });
+app.get("/api/events", authMiddleware, async (req, res) => {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("Access-Control-Allow-Origin", config.cors.origin);
+    res.flushHeaders();
+
+    const client = { res, user: req.user, id: crypto.randomBytes(8).toString("hex") };
+    sseClients.add(client);
+
+    logger.info("SSE client connected", { username: req.user, clientId: client.id });
+
+    req.on("close", () => {
+        sseClients.delete(client);
+        logger.info("SSE client disconnected", { username: req.user, clientId: client.id });
+    });
+
+    res.write(`data: ${JSON.stringify({ type: "connected", clientId: client.id })}\n\n`);
+});
+
+app.get("/uploads/:filename", (req, res) => {
+    if (!config.features.uploads) {
+        return res.status(403).json({ error: "uploads disabled" });
     }
 
-    logger.info("File uploaded successfully", {
-        user: req.user,
-        filename: req.file.filename,
-        originalName: req.file.originalname,
-        size: req.file.size
-    });
-
-    res.json({
-        success: true,
-        file: {
-            filename: req.file.filename,
-            originalName: req.file.originalname,
-            mimetype: req.file.mimetype,
-            size: req.file.size,
-            uploadedAt: Date.now(),
-            uploadedBy: req.user,
-            downloadUrl: `/api/download/${req.file.filename}`
-        }
-    });
-});
-
-app.post("/api/upload/voice/:voiceId", require2FAMiddleware, (req, res) => {
-    const voiceId = req.params.voiceId;
-    const filePath = path.join(config.uploads.dir, voiceId);
-    
-    const writeStream = fs.createWriteStream(filePath);
-    req.pipe(writeStream);
-
-    writeStream.on('finish', () => {
-        logger.info("Voice message uploaded", { user: req.user, voiceId, size: fs.statSync(filePath).size });
-        res.json({ success: true, voiceId });
-    });
-
-    writeStream.on('error', (error) => {
-        logger.error("Voice message upload failed", { user: req.user, voiceId, error: error.message });
-        res.status(500).json({ error: "upload failed" });
-    });
-});
-
-app.get("/api/download/:filename", (req, res) => {
     const filename = req.params.filename;
     const filePath = path.join(config.uploads.dir, filename);
 
-    if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
-        logger.warn("Invalid filename attempted", { filename, ip: req.ip });
-        return res.status(400).json({ error: "invalid filename" });
+    if (!fs.existsSync(filePath)) {
+        return res.status(404).json({ error: "file not found" });
     }
 
-    if (fs.existsSync(filePath)) {
-        logger.info("File download started", { filename, ip: req.ip, size: fs.statSync(filePath).size });
-        res.download(filePath, (err) => {
-            if (err) {
-                logger.error("File download error", { filename, error: err.message, ip: req.ip });
-            } else {
-                logger.info("File download completed", { filename, ip: req.ip });
-            }
-        });
-    } else {
-        logger.warn("File not found for download", { filename, ip: req.ip });
-        res.status(404).json({ error: "file not found" });
+    res.sendFile(filePath);
+});
+
+const server = app.listen(config.port, () => {
+    logger.info("Server started", { port: config.port });
+});
+
+const wss = new WebSocketServer({ server, path: "/ws" });
+
+wss.on("connection", async (ws, req) => {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const token = url.searchParams.get("token");
+
+    if (!token) {
+        ws.close(1008, "No token");
+        logger.warn("WebSocket connection rejected: no token", { ip: req.socket.remoteAddress });
+        return;
     }
+
+    const user = await storage.validateToken(token);
+    if (!user) {
+        ws.close(1008, "Invalid token");
+        logger.warn("WebSocket connection rejected: invalid token", { ip: req.socket.remoteAddress });
+        return;
+    }
+
+    ws.user = user;
+    ws.id = crypto.randomBytes(8).toString("hex");
+    wsClients.add(ws);
+
+    logger.info("WebSocket client connected", { username: user, clientId: ws.id, ip: req.socket.remoteAddress });
+
+    ws.on("message", async (data) => {
+        try {
+            const message = JSON.parse(data);
+            const handler = actionHandlers[message.action];
+
+            if (!handler) {
+                logger.warn("Unknown WebSocket action", { action: message.action, username: user });
+                ws.send(JSON.stringify({ error: "unknown action" }));
+                return;
+            }
+
+            const result = await handler(message, user);
+            ws.send(JSON.stringify({ ...result, action: message.action }));
+        } catch (error) {
+            logger.error("WebSocket message error", { error: error.message, username: user });
+            ws.send(JSON.stringify({ error: "internal error" }));
+        }
+    });
+
+    ws.on("close", () => {
+        wsClients.delete(ws);
+        logger.info("WebSocket client disconnected", { username: user, clientId: ws.id });
+    });
+
+    ws.send(JSON.stringify({ type: "connected", clientId: ws.id }));
+});
+
+process.on("uncaughtException", (error) => {
+    logger.error("Uncaught exception", { error: error.message, stack: error.stack });
+});
+
+process.on("unhandledRejection", (reason, promise) => {
+    logger.error("Unhandled rejection", { reason: reason?.message || reason, promise });
 });
 
 setInterval(() => {
@@ -834,94 +725,7 @@ setInterval(() => {
     for (const [username, session] of pending2FASessions.entries()) {
         if (now - session.createdAt > 5 * 60 * 1000) {
             pending2FASessions.delete(username);
-            logger.info("Expired 2FA session cleaned up", { username });
+            logger.info("Pending 2FA session expired", { username });
         }
     }
-}, 10 * 60 * 1000);
-
-if (config.features.ws) {
-    const wss = new WebSocketServer({ noServer: true });
-
-    wss.on("connection", (ws, req) => {
-        wsClients.add(ws);
-        ws.isAlive = true;
-
-        logger.info("WebSocket connection established", { user: ws.user });
-
-        ws.on("pong", () => { ws.isAlive = true; });
-        ws.on("close", () => {
-            wsClients.delete(ws);
-            logger.info("WebSocket connection closed", { user: ws.user });
-        });
-
-        ws.on("message", async data => {
-            try {
-                const payload = JSON.parse(data.toString());
-                const result = await actionHandlers[payload.action]?.(payload, ws.user);
-                if (result) ws.send(JSON.stringify(result));
-                logger.info("WebSocket message processed", { user: ws.user, action: payload.action });
-            } catch (e) {
-                logger.error("WebSocket error", { user: ws.user, error: e.message });
-            }
-        });
-    });
-
-    const server = app.listen(config.server.port, config.server.host, () => {
-        logger.info("Server started", { host: config.server.host, port: config.server.port });
-    });
-
-    const interval = setInterval(() => {
-        [...wsClients].forEach(ws => {
-            if (!ws.isAlive) {
-                ws.terminate();
-                logger.info("WebSocket connection terminated due to inactivity", { user: ws.user });
-                return;
-            }
-            ws.isAlive = false;
-            try { ws.ping(); } catch {}
-        });
-    }, 30000);
-
-    server.on("upgrade", async (req, socket, head) => {
-        try {
-            const url = new URL(req.url, `http://${req.headers.host}`);
-            if (url.pathname !== "/ws") {
-                logger.warn("WebSocket upgrade failed: invalid path", { path: url.pathname, ip: req.socket.remoteAddress });
-                return socket.destroy();
-            }
-
-            const token = url.searchParams.get("token");
-            const user = token ? await storage.validateToken(token) : null;
-            if (!user) {
-                logger.warn("WebSocket upgrade failed: invalid token", { ip: req.socket.remoteAddress });
-                return socket.destroy();
-            }
-
-            const twoFactorEnabled = await storage.isTwoFactorEnabled(user);
-            if (twoFactorEnabled) {
-                const session = pending2FASessions.get(user);
-                if (!session || !session.twoFactorVerified) {
-                    logger.warn("WebSocket upgrade failed: 2FA required", { user, ip: req.socket.remoteAddress });
-                    return socket.destroy();
-                }
-            }
-
-            wss.handleUpgrade(req, socket, head, ws => {
-                ws.user = user;
-                wss.emit("connection", ws, req);
-            });
-        } catch (error) {
-            logger.error("WebSocket upgrade error", { error: error.message, ip: req.socket.remoteAddress });
-            socket.destroy();
-        }
-    });
-
-    server.on("close", () => {
-        clearInterval(interval);
-        logger.info("Server stopped");
-    });
-} else {
-    app.listen(config.server.port, config.server.host, () => {
-        logger.info("Server started", { host: config.server.host, port: config.server.port });
-    })
-}
+}, 60000);
