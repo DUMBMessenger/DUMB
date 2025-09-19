@@ -169,8 +169,8 @@ async function runInstaller() {
         "sql.js": "^1.8.0",
         mysql2: "^3.9.7",
         multer: "^1.4.4",
-        cors: "^2.8.5"
-        qrcode: "^1.5.4"
+        cors: "^2.8.5",
+        qrcode: "^1.5.4",
         speakeasy: "^2.0.0"
       }
     };
