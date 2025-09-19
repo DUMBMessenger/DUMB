@@ -458,9 +458,14 @@ const actionHandlers = {
     },
 
     sendMessage: async ({ channel, text, replyTo, fileId, voiceMessage }, user) => {
-        if (!user || !channel || !text || typeof text !== "string") {
-            logger.warn("Message send failed: invalid parameters", { username: user, channel, textLength: text?.length });
+        if (!user || !channel) {
+            logger.warn("Message send failed: invalid parameters", { username: user, channel });
             return { error: "bad input" };
+        }
+
+        if (!text && !fileId && !voiceMessage) {
+            logger.warn("Message send failed: no content", { username: user, channel });
+            return { error: "no content" };
         }
 
         if (!await storage.isChannelMember(channel, user)) {
@@ -491,7 +496,7 @@ const actionHandlers = {
         const msg = {
             from: user,
             channel: channel,
-            text: text.trim().slice(0, config.security.maxMessageLength || 1000),
+            text: text ? text.trim().slice(0, config.security.maxMessageLength || 1000) : "",
             ts: Date.now(),
             replyTo: replyTo || null,
             file: fileAttachment,
@@ -518,7 +523,58 @@ const actionHandlers = {
             }
         });
 
-        logger.info("Message sent", { username: user, channel, messageId: saved.id, hasFile: !!fileId, hasVoice: !!voiceMessage });
+        logger.info("Message sent", { username: user, channel, messageId: saved.id, hasFile: !!fileId, hasVoice: !!voiceMessage, hasText: !!text });
+        return { success: true, message: saved };
+    },
+
+    sendVoiceOnly: async ({ channel, voiceMessage }, user) => {
+        if (!user || !channel || !voiceMessage) {
+            logger.warn("Voice only send failed: invalid parameters", { username: user, channel, voiceMessage });
+            return { error: "bad input" };
+        }
+
+        if (!await storage.isChannelMember(channel, user)) {
+            logger.warn("Send voice failed: not channel member", { user, channel });
+            return { error: "not a channel member" };
+        }
+
+        const voiceAttachment = {
+            filename: voiceMessage,
+            duration: 0,
+            downloadUrl: `/api/download/${voiceMessage}`
+        };
+
+        const msg = {
+            from: user,
+            channel: channel,
+            text: "",
+            ts: Date.now(),
+            replyTo: null,
+            file: null,
+            voice: voiceAttachment
+        };
+
+        const saved = await storage.saveMessage(msg);
+        
+        const messageToSend = {
+            ...saved,
+            type: "message",
+            action: "new"
+        };
+
+        wsClients.forEach(client => {
+            if (client.readyState === 1 && client.user === user) {
+                client.send(JSON.stringify(messageToSend));
+            }
+        });
+
+        sseClients.forEach(client => {
+            if (client.user === user) {
+                client.res.write(`data: ${JSON.stringify(messageToSend)}\n\n`);
+            }
+        });
+
+        logger.info("Voice message sent", { username: user, channel, messageId: saved.id, voiceMessage });
         return { success: true, message: saved };
     },
 
@@ -782,10 +838,12 @@ createEndpoint('post', '/api/2fa/disable', require2FAMiddleware, 'disable2FA');
 createEndpoint('get', '/api/2fa/status', require2FAMiddleware, 'get2FAStatus');
 createEndpoint('get', '/api/updates/check', require2FAMiddleware, 'getUpdates');
 createEndpoint('post', '/api/message', channelAuthMiddleware, 'sendMessage');
+createEndpoint('post', '/api/message/voice-only', channelAuthMiddleware, 'sendVoiceOnly');
 createEndpoint('get', '/api/messages', channelAuthMiddleware, 'getMessages', req => req.query);
 createEndpoint('post', '/api/channels/create', require2FAMiddleware, 'createChannel');
 createEndpoint('get', '/api/channels', require2FAMiddleware, 'getChannels');
 createEndpoint('post', '/api/channels/join', require2FAMiddleware, 'joinChannel');
+createEndpoint('post', '/api/channels/join-by-id', require2FAMiddleware, 'joinChannel');
 createEndpoint('post', '/api/channels/leave', require2FAMiddleware, 'leaveChannel');
 createEndpoint('get', '/api/channels/members', channelAuthMiddleware, 'getChannelMembers', req => req.query);
 createEndpoint('get', '/api/users', require2FAMiddleware, 'getUsers');

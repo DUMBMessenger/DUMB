@@ -75,7 +75,7 @@ async function createTables() {
     )`,
     `CREATE TABLE IF NOT EXISTS channels (
       id VARCHAR(255) PRIMARY KEY,
-      name VARCHAR(255) NOT NULL,
+      name VARCHAR(255) NOT NULL UNIQUE,
       creator VARCHAR(255) NOT NULL,
       custom_id BOOLEAN DEFAULT FALSE,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -208,7 +208,7 @@ export async function registerUser(username, passwordPlain) {
     salt,
   ]);
 
-  return true;
+  r eturn true;
 }
 
 export async function authenticate(username, passwordPlain) {
@@ -319,19 +319,26 @@ export async function getChannels(username) {
 }
 
 export async function joinChannel(channel, username) {
-  const channelExists = await queryOne("SELECT id FROM channels WHERE id = ?", [channel]);
-  if (!channelExists) return false;
+  let channelId = channel;
+  const channelByName = await queryOne("SELECT id FROM channels WHERE name = ?", [channel]);
+  if (channelByName) {
+    channelId = channelByName.id;
+  } else {
+    const channelById = await queryOne("SELECT id FROM channels WHERE id = ?", [channel]);
+    if (!channelById) return false;
+    channelId = channelById.id;
+  }
 
   try {
     if (config.storage.type === "sqlite") {
       await query(
         `INSERT INTO channel_members (channel, username) VALUES (?, ?) ON CONFLICT(channel, username) DO UPDATE SET joined_at = CURRENT_TIMESTAMP`,
-        [channel, username]
+        [channelId, username]
       );
     } else {
       await query(
         `INSERT INTO channel_members (channel, username) VALUES (?, ?) ON DUPLICATE KEY UPDATE joined_at = CURRENT_TIMESTAMP`,
-        [channel, username]
+        [channelId, username]
       );
     }
     return true;
@@ -341,22 +348,52 @@ export async function joinChannel(channel, username) {
 }
 
 export async function leaveChannel(channel, username) {
+  let channelId = channel;
+  const channelByName = await queryOne("SELECT id FROM channels WHERE name = ?", [channel]);
+  if (channelByName) {
+    channelId = channelByName.id;
+  } else {
+    const channelById = await queryOne("SELECT id FROM channels WHERE id = ?", [channel]);
+    if (!channelById) return false;
+    channelId = channelById.id;
+  }
+
   const result = await query(
     "DELETE FROM channel_members WHERE channel = ? AND username = ?",
-    [channel, username]
+    [channelId, username]
   );
   return result.affectedRows > 0;
 }
 
 export async function getChannelMembers(channel) {
-  const result = await query("SELECT username FROM channel_members WHERE channel = ?", [channel]);
+  let channelId = channel;
+  const channelByName = await queryOne("SELECT id FROM channels WHERE name = ?", [channel]);
+  if (channelByName) {
+    channelId = channelByName.id;
+  } else {
+    const channelById = await queryOne("SELECT id FROM channels WHERE id = ?", [channel]);
+    if (!channelById) return [];
+    channelId = channelById.id;
+  }
+
+  const result = await query("SELECT username FROM channel_members WHERE channel = ?", [channelId]);
   return result.rows.map((m) => m.username);
 }
 
 export async function isChannelMember(channel, username) {
+  let channelId = channel;
+  const channelByName = await queryOne("SELECT id FROM channels WHERE name = ?", [channel]);
+  if (channelByName) {
+    channelId = channelByName.id;
+  } else {
+    const channelById = await queryOne("SELECT id FROM channels WHERE id = ?", [channel]);
+    if (!channelById) return false;
+    channelId = channelById.id;
+  }
+
   const result = await queryOne(
     "SELECT 1 FROM channel_members WHERE channel = ? AND username = ?",
-    [channel, username]
+    [channelId, username]
   );
   return !!result;
 }

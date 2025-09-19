@@ -122,15 +122,18 @@ export function getChannels(username) {
 }
 
 export function joinChannel(channel, username) {
-  if (!db.channels.find(c => c.id === channel)) return false;
-  if (db.channelMembers.find(cm => cm.channel === channel && cm.username === username)) return true;
-  db.channelMembers.push({ channel, username, joinedAt: Date.now() });
+  const channelObj = db.channels.find(c => c.id === channel || c.name === channel);
+  if (!channelObj) return false;
+  if (db.channelMembers.find(cm => cm.channel === channelObj.id && cm.username === username)) return true;
+  db.channelMembers.push({ channel: channelObj.id, username, joinedAt: Date.now() });
   save();
   return true;
 }
 
 export function leaveChannel(channel, username) {
-  const index = db.channelMembers.findIndex(cm => cm.channel === channel && cm.username === username);
+  const channelObj = db.channels.find(c => c.id === channel || c.name === channel);
+  if (!channelObj) return false;
+  const index = db.channelMembers.findIndex(cm => cm.channel === channelObj.id && cm.username === username);
   if (index === -1) return false;
   db.channelMembers.splice(index, 1);
   save();
@@ -138,11 +141,15 @@ export function leaveChannel(channel, username) {
 }
 
 export function getChannelMembers(channel) {
-  return db.channelMembers.filter(cm => cm.channel === channel).map(cm => cm.username);
+  const channelObj = db.channels.find(c => c.id === channel || c.name === channel);
+  if (!channelObj) return [];
+  return db.channelMembers.filter(cm => cm.channel === channelObj.id).map(cm => cm.username);
 }
 
 export function isChannelMember(channel, username) {
-  return db.channelMembers.some(cm => cm.channel === channel && cm.username === username);
+  const channelObj = db.channels.find(c => c.id === channel || c.name === channel);
+  if (!channelObj) return false;
+  return db.channelMembers.some(cm => cm.channel === channelObj.id && cm.username === username);
 }
 
 export function saveWebRTCOffer(fromUser, toUser, offer, channel) {
