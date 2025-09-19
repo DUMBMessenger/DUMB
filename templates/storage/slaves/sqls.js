@@ -208,7 +208,7 @@ export async function registerUser(username, passwordPlain) {
     salt,
   ]);
 
-  r eturn true;
+  return true;
 }
 
 export async function authenticate(username, passwordPlain) {
