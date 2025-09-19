@@ -186,7 +186,7 @@ async function runInstaller() {
     console.log("🧹 Cleaning up...");
     execSync("rm -rf temp_repo", { stdio: "inherit" });
 
-    console.log("
+    console.log("h")
 
   } catch (err) {
     console.error("❌ Installation failed:", err);
