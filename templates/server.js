@@ -393,6 +393,22 @@ const actionHandlers = {
         return { success: true, channels };
     },
 
+    searchChannels: async ({ query }, user) => {
+        if (!user) {
+            logger.warn("Search channels failed: not authenticated");
+            return { error: "not auth" };
+        }
+
+        if (!query || typeof query !== "string") {
+            logger.warn("Search channels failed: invalid query", { username: user, query });
+            return { error: "invalid query" };
+        }
+
+        const channels = await storage.searchChannels(query);
+        logger.info("Channels search completed", { username: user, query, count: channels.length });
+        return { success: true, channels };
+    },
+
     joinChannel: async ({ channel }, user) => {
         if (!user || !channel || typeof channel !== "string") {
             logger.warn("Channel join failed: invalid channel", { username: user, channel });
@@ -846,6 +862,7 @@ createEndpoint('post', '/api/channels/join', require2FAMiddleware, 'joinChannel'
 createEndpoint('post', '/api/channels/join-by-id', require2FAMiddleware, 'joinChannel');
 createEndpoint('post', '/api/channels/leave', require2FAMiddleware, 'leaveChannel');
 createEndpoint('get', '/api/channels/members', channelAuthMiddleware, 'getChannelMembers', req => req.query);
+createEndpoint('post', '/api/channels/search', require2FAMiddleware, 'searchChannels');
 createEndpoint('get', '/api/users', require2FAMiddleware, 'getUsers');
 createEndpoint('post', '/api/webrtc/offer', require2FAMiddleware, 'webrtcOffer');
 createEndpoint('post', '/api/webrtc/answer', require2FAMiddleware, 'webrtcAnswer');

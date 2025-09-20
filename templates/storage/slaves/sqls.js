@@ -441,7 +441,7 @@ export async function saveWebRTCAnswer(fromUser, toUser, answer) {
 export async function getWebRTCAnswer(fromUser, toUser) {
   await query("DELETE FROM webrtc_answers WHERE timestamp < ?", [Date.now() - 300000]);
   const result = await queryOne(
-    "SELECT * FROM webrtc_answers WHERE from_user = ? AND to_user = ? ORDER BY timestamp DESC LIMIT 1",
+    "SELECT * FROM webrtc_answers WHERE from_user = ? AND to_user = ? ORDER BY timestamp DESC LIMit 1",
     [fromUser, toUser]
   );
   if (!result) return null;
