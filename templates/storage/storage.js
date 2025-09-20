@@ -20,6 +20,7 @@ export const saveMessage = backend.saveMessage;
 export const getMessages = backend.getMessages;
 export const createChannel = backend.createChannel;
 export const getChannels = backend.getChannels;
+export const searchChannels = backend.searchChannels;
 export const joinChannel = backend.joinChannel;
 export const leaveChannel = backend.leaveChannel;
 export const getChannelMembers = backend.getChannelMembers;
