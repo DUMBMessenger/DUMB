@@ -121,6 +121,12 @@ export function getChannels(username) {
   );
 }
 
+export function searchChannels(query) {
+  return db.channels.filter(c => 
+    c.name.toLowerCase().includes(query.toLowerCase())
+  );
+}
+
 export function joinChannel(channel, username) {
   const channelObj = db.channels.find(c => c.id === channel || c.name === channel);
   if (!channelObj) return false;
