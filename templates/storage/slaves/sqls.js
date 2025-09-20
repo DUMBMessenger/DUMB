@@ -318,6 +318,14 @@ export async function getChannels(username) {
   return result.rows;
 }
 
+export async function searchChannels(query) {
+  const result = await query(
+    `SELECT * FROM channels WHERE LOWER(name) LIKE LOWER(?)`,
+    [`%${query}%`]
+  );
+  return result.rows;
+}
+
 export async function joinChannel(channel, username) {
   let channelId = channel;
   const channelByName = await queryOne("SELECT id FROM channels WHERE name = ?", [channel]);
