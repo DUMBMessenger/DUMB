@@ -12,7 +12,8 @@ let db = {
   webrtcOffers: [],
   webrtcAnswers: [],
   iceCandidates: [],
-  twoFactorSecrets: []
+  twoFactorSecrets: [],
+  voiceMessages: []
 };
 const file = config.storage.file;
 
@@ -239,6 +240,34 @@ export function enableTwoFactor(username, enabled) {
   user.twoFactorEnabled = enabled;
   save();
   return true;
+}
+
+export function saveVoiceMessageInfo(voiceId, username, channel, duration) {
+  db.voiceMessages.push({
+    voiceId,
+    username,
+    channel,
+    duration,
+    timestamp: Date.now()
+  });
+  save();
+}
+
+export function getVoiceMessageDuration(voiceId) {
+  const voiceMsg = db.voiceMessages.find(v => v.voiceId === voiceId);
+  return voiceMsg ? voiceMsg.duration : 0;
+}
+
+export function cleanupOldVoiceMessages(maxAgeSeconds = 86400) {
+  const cutoff = Date.now() - (maxAgeSeconds * 1000);
+  const initialLength = db.voiceMessages.length;
+  db.voiceMessages = db.voiceMessages.filter(v => v.timestamp > cutoff);
+  
+  if (db.voiceMessages.length !== initialLength) {
+    save();
+  }
+  
+  return initialLength - db.voiceMessages.length;
 }
 
 load();

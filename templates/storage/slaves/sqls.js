@@ -135,7 +135,16 @@ async function createTables() {
       secret VARCHAR(255),
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE
-    )`
+    )`,
+    `CREATE TABLE IF NOT EXISTS voice_messages (
+  voice_id VARCHAR(255) PRIMARY KEY,
+  username VARCHAR(255) NOT NULL,
+  channel VARCHAR(255) NOT NULL,
+  duration INTEGER NOT NULL,
+  timestamp BIGINT NOT NULL,
+  FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE,
+  FOREIGN KEY (channel) REFERENCES channels(id) ON DELETE CASCADE
+)`
   ];
 
   if (config.storage.type === "sqlite") {
@@ -515,6 +524,30 @@ export async function enableTwoFactor(username, enabled) {
     username,
   ]);
   return result.affectedRows > 0;
+}
+
+export async function saveVoiceMessageInfo(voiceId, username, channel, duration) {
+  await query(
+    "INSERT INTO voice_messages (voice_id, username, channel, duration, timestamp) VALUES (?, ?, ?, ?, ?)",
+    [voiceId, username, channel, duration, Date.now()]
+  );
+}
+
+export async function getVoiceMessageDuration(voiceId) {
+  const result = await queryOne(
+    "SELECT duration FROM voice_messages WHERE voice_id = ?",
+    [voiceId]
+  );
+  return result ? result.duration : 0;
+}
+
+export async function cleanupOldVoiceMessages(maxAgeSeconds = 86400) {
+  const cutoff = Date.now() - (maxAgeSeconds * 1000);
+  const result = await query(
+    "DELETE FROM voice_messages WHERE timestamp < ?",
+    [cutoff]
+  );
+  return result.affectedRows;
 }
 
 initDatabase().catch((error) => {

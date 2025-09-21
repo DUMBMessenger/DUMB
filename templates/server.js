@@ -409,7 +409,6 @@ const actionHandlers = {
     return { success: true, channels };
    },
 
-
     joinChannel: async ({ channel }, user) => {
         if (!user || !channel || typeof channel !== "string") {
             logger.warn("Channel join failed: invalid channel", { username: user, channel });
@@ -470,6 +469,13 @@ const actionHandlers = {
         }
 
         const messages = await storage.getMessages(channel, Math.min(limit, 100), before);
+        
+        for (let message of messages) {
+            if (message.voice && message.voice.filename) {
+                message.voice.duration = await storage.getVoiceMessageDuration(message.voice.filename) || 0;
+            }
+        }
+        
         logger.info("Messages retrieved", { username: user, channel, count: messages.length });
         return { success: true, messages };
     },
@@ -492,20 +498,24 @@ const actionHandlers = {
 
         let fileAttachment = null;
         if (fileId) {
-            fileAttachment = {
-                filename: fileId,
-                originalName: fileId,
-                mimetype: "application/octet-stream", 
-                size: 0,
-                downloadUrl: `/api/download/${fileId}`
-            };
+            const fileInfo = await storage.getFileInfo(fileId);
+            if (fileInfo) {
+                fileAttachment = {
+                    filename: fileInfo.filename,
+                    originalName: fileInfo.originalName,
+                    mimetype: fileInfo.mimetype,
+                    size: fileInfo.size,
+                    downloadUrl: `/api/download/${fileInfo.filename}`
+                };
+            }
         }
 
         let voiceAttachment = null;
         if (voiceMessage) {
+            const duration = await storage.getVoiceMessageDuration(voiceMessage) || 0;
             voiceAttachment = {
                 filename: voiceMessage,
-                duration: 0,
+                duration: duration,
                 downloadUrl: `/api/download/${voiceMessage}`
             };
         }
@@ -529,15 +539,13 @@ const actionHandlers = {
         };
 
         wsClients.forEach(client => {
-            if (client.readyState === 1 && client.user === user) {
+            if (client.readyState === 1) {
                 client.send(JSON.stringify(messageToSend));
             }
         });
 
         sseClients.forEach(client => {
-            if (client.user === user) {
-                client.res.write(`data: ${JSON.stringify(messageToSend)}\n\n`);
-            }
+            client.res.write(`data: ${JSON.stringify(messageToSend)}\n\n`);
         });
 
         logger.info("Message sent", { username: user, channel, messageId: saved.id, hasFile: !!fileId, hasVoice: !!voiceMessage, hasText: !!text });
@@ -555,9 +563,11 @@ const actionHandlers = {
             return { error: "not a channel member" };
         }
 
+        const duration = await storage.getVoiceMessageDuration(voiceMessage) || 0;
+
         const voiceAttachment = {
             filename: voiceMessage,
-            duration: 0,
+            duration: duration,
             downloadUrl: `/api/download/${voiceMessage}`
         };
 
@@ -580,18 +590,16 @@ const actionHandlers = {
         };
 
         wsClients.forEach(client => {
-            if (client.readyState === 1 && client.user === user) {
+            if (client.readyState === 1) {
                 client.send(JSON.stringify(messageToSend));
             }
         });
 
         sseClients.forEach(client => {
-            if (client.user === user) {
-                client.res.write(`data: ${JSON.stringify(messageToSend)}\n\n`);
-            }
+            client.res.write(`data: ${JSON.stringify(messageToSend)}\n\n`);
         });
 
-        logger.info("Voice message sent", { username: user, channel, messageId: saved.id, voiceMessage });
+        logger.info("Voice message sent", { username: user, channel, messageId: saved.id, voiceMessage, duration });
         return { success: true, message: saved };
     },
 
@@ -639,9 +647,22 @@ const actionHandlers = {
             return { error: "no file" };
         }
 
-        const fileUrl = `${config.features.uploads ? config.uploads.urlBase : ''}/${req.file.filename}`;
+        const fileId = crypto.randomBytes(16).toString("hex");
+        const fileInfo = {
+            id: fileId,
+            filename: req.file.filename,
+            originalName: req.file.originalname,
+            mimetype: req.file.mimetype,
+            size: req.file.size,
+            uploadedAt: Date.now(),
+            uploadedBy: user
+        };
+
+        await storage.saveFileInfo(fileInfo);
+
         logger.info("File uploaded successfully", { 
             username: user, 
+            fileId,
             filename: req.file.filename,
             originalName: req.file.originalname,
             size: req.file.size
@@ -650,6 +671,7 @@ const actionHandlers = {
         return { 
             success: true, 
             file: {
+                id: fileId,
                 filename: req.file.filename,
                 originalName: req.file.originalname,
                 mimetype: req.file.mimetype,
@@ -782,18 +804,18 @@ const actionHandlers = {
     },
 
     uploadVoiceMessage: async ({ channel, duration }, user) => {
-    if (!user || !channel) {
-        logger.warn("Voice message upload failed: missing parameters", { user, channel });
-        return { error: "missing parameters" };
-    }
+        if (!user || !channel) {
+            logger.warn("Voice message upload failed: missing parameters", { user, channel });
+            return { error: "missing parameters" };
+        }
 
-    const voiceId = crypto.randomBytes(16).toString("hex") + ".ogg";
-    
-    await storage.saveVoiceMessageInfo(voiceId, user, channel, duration);
-    
-    logger.info("Voice message upload initiated", { user, channel, voiceId, duration });
-    return { success: true, voiceId, uploadUrl: `/api/upload/voice/${voiceId}` };
-},
+        const voiceId = crypto.randomBytes(16).toString("hex") + ".ogg";
+        
+        await storage.saveVoiceMessageInfo(voiceId, user, channel, duration);
+        
+        logger.info("Voice message upload initiated", { user, channel, voiceId, duration });
+        return { success: true, voiceId, uploadUrl: `/api/upload/voice/${voiceId}` };
+    },
 
     getUpdates: async (data, user) => {
         if (!user) {
@@ -948,12 +970,15 @@ app.get("/api/download/:filename", (req, res) => {
     }
 
     if (fs.existsSync(filePath)) {
-        logger.info("File download started", { filename, ip: req.ip, size: fs.statSync(filePath).size });
-        res.download(filePath, (err) => {
+        const originalName = storage.getOriginalFileName(filename);
+        logger.info("File download started", { filename, originalName, ip: req.ip, size: fs.statSync(filePath).size });
+        
+        res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(originalName)}"`);
+        res.download(filePath, originalName, (err) => {
             if (err) {
                 logger.error("File download error", { filename, error: err.message, ip: req.ip });
             } else {
-                logger.info("File download completed", { filename, ip: req.ip });
+                logger.info("File download completed", { filename, originalName, ip: req.ip });
             }
         });
     } else {
@@ -1065,6 +1090,18 @@ const interval = setInterval(() => {
             pending2FASessions.delete(username);
             logger.info("2FA session expired", { username });
         }
+    }
+
+    if (now % 3600000 < 30000) {
+        storage.cleanupOldVoiceMessages(24 * 60 * 60)
+            .then(deletedCount => {
+                if (deletedCount > 0) {
+                    logger.info("Cleaned up old voice message records", { deletedCount });
+                }
+            })
+            .catch(error => {
+                logger.error("Failed to cleanup voice message records", { error: error.message });
+            });
     }
 }, 30000);
 
