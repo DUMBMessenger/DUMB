@@ -37,3 +37,6 @@ export const isTwoFactorEnabled = backend.isTwoFactorEnabled;
 export const getTwoFactorSecret = backend.getTwoFactorSecret;
 export const setTwoFactorSecret = backend.setTwoFactorSecret;
 export const enableTwoFactor = backend.enableTwoFactor;
+export const saveVoiceMessageInfo = backend.saveVoiceMessageInfo;
+export const getVoiceMessageDuration = backend.getVoiceMessageDuration;
+export const cleanupOldVoiceMessages = backend.cleanupOldVoiceMessages;

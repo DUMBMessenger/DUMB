@@ -782,15 +782,18 @@ const actionHandlers = {
     },
 
     uploadVoiceMessage: async ({ channel, duration }, user) => {
-        if (!user || !channel) {
-            logger.warn("Voice message upload failed: missing parameters", { user, channel });
-            return { error: "missing parameters" };
-        }
+    if (!user || !channel) {
+        logger.warn("Voice message upload failed: missing parameters", { user, channel });
+        return { error: "missing parameters" };
+    }
 
-        const voiceId = crypto.randomBytes(16).toString("hex") + ".ogg";
-        logger.info("Voice message upload initiated", { user, channel, voiceId, duration });
-        return { success: true, voiceId, uploadUrl: `/api/upload/voice/${voiceId}` };
-    },
+    const voiceId = crypto.randomBytes(16).toString("hex") + ".ogg";
+    
+    await storage.saveVoiceMessageInfo(voiceId, user, channel, duration);
+    
+    logger.info("Voice message upload initiated", { user, channel, voiceId, duration });
+    return { success: true, voiceId, uploadUrl: `/api/upload/voice/${voiceId}` };
+},
 
     getUpdates: async (data, user) => {
         if (!user) {
