@@ -407,7 +407,7 @@ const actionHandlers = {
     const channels = await storage.searchChannels(query);
     logger.info("Channels search completed", { username: user, query, count: channels.length });
     return { success: true, channels };
-}
+   },
 
 
     joinChannel: async ({ channel }, user) => {
