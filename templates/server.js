@@ -394,20 +394,21 @@ const actionHandlers = {
     },
 
     searchChannels: async ({ query }, user) => {
-        if (!user) {
-            logger.warn("Search channels failed: not authenticated");
-            return { error: "not auth" };
-        }
+    if (!user) {
+        logger.warn("Search channels failed: not authenticated");
+        return { error: "not auth" };
+    }
 
-        if (!query || typeof query !== "string") {
-            logger.warn("Search channels failed: invalid query", { username: user, query });
-            return { error: "invalid query" };
-        }
+    if (query === undefined || query === null) {
+        logger.warn("Search channels failed: invalid query", { username: user, query });
+        return { error: "invalid query" };
+    }
 
-        const channels = await storage.searchChannels(query);
-        logger.info("Channels search completed", { username: user, query, count: channels.length });
-        return { success: true, channels };
-    },
+    const channels = await storage.searchChannels(query);
+    logger.info("Channels search completed", { username: user, query, count: channels.length });
+    return { success: true, channels };
+}
+
 
     joinChannel: async ({ channel }, user) => {
         if (!user || !channel || typeof channel !== "string") {
