@@ -137,14 +137,24 @@ async function createTables() {
       FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE
     )`,
     `CREATE TABLE IF NOT EXISTS voice_messages (
-  voice_id VARCHAR(255) PRIMARY KEY,
-  username VARCHAR(255) NOT NULL,
-  channel VARCHAR(255) NOT NULL,
-  duration INTEGER NOT NULL,
-  timestamp BIGINT NOT NULL,
-  FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE,
-  FOREIGN KEY (channel) REFERENCES channels(id) ON DELETE CASCADE
-)`
+      voice_id VARCHAR(255) PRIMARY KEY,
+      username VARCHAR(255) NOT NULL,
+      channel VARCHAR(255) NOT NULL,
+      duration INTEGER NOT NULL,
+      timestamp BIGINT NOT NULL,
+      FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE,
+      FOREIGN KEY (channel) REFERENCES channels(id) ON DELETE CASCADE
+    )`,
+    `CREATE TABLE IF NOT EXISTS files (
+      id VARCHAR(255) PRIMARY KEY,
+      filename VARCHAR(255) NOT NULL,
+      original_name VARCHAR(255) NOT NULL,
+      mimetype VARCHAR(255) NOT NULL,
+      size INTEGER NOT NULL,
+      uploaded_at BIGINT NOT NULL,
+      uploaded_by VARCHAR(255) NOT NULL,
+      FOREIGN KEY (uploaded_by) REFERENCES users(username) ON DELETE CASCADE
+    )`
   ];
 
   if (config.storage.type === "sqlite") {
@@ -548,6 +558,41 @@ export async function cleanupOldVoiceMessages(maxAgeSeconds = 86400) {
     [cutoff]
   );
   return result.affectedRows;
+}
+
+export async function saveFileInfo(fileInfo) {
+  await query(
+    "INSERT INTO files (id, filename, original_name, mimetype, size, uploaded_at, uploaded_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    [
+      fileInfo.id,
+      fileInfo.filename,
+      fileInfo.originalName,
+      fileInfo.mimetype,
+      fileInfo.size,
+      fileInfo.uploadedAt,
+      fileInfo.uploadedBy
+    ]
+  );
+}
+
+export async function getFileInfo(fileId) {
+  const result = await queryOne("SELECT * FROM files WHERE id = ?", [fileId]);
+  if (!result) return null;
+  
+  return {
+    id: result.id,
+    filename: result.filename,
+    originalName: result.original_name,
+    mimetype: result.mimetype,
+    size: result.size,
+    uploadedAt: result.uploaded_at,
+    uploadedBy: result.uploaded_by
+  };
+}
+
+export async function getOriginalFileName(filename) {
+  const result = await queryOne("SELECT original_name FROM files WHERE filename = ?", [filename]);
+  return result ? result.original_name : filename;
 }
 
 initDatabase().catch((error) => {

@@ -13,7 +13,8 @@ let db = {
   webrtcAnswers: [],
   iceCandidates: [],
   twoFactorSecrets: [],
-  voiceMessages: []
+  voiceMessages: [],
+  files: []
 };
 const file = config.storage.file;
 
@@ -122,7 +123,6 @@ export function getChannels(username) {
   );
 }
 
-
 export function searchChannels(query) {
   if (query === "" || query === "%") {
     return db.channels;
@@ -131,6 +131,7 @@ export function searchChannels(query) {
     c.name.toLowerCase().includes(query.toLowerCase())
   );
 }
+
 export function joinChannel(channel, username) {
   const channelObj = db.channels.find(c => c.id === channel || c.name === channel);
   if (!channelObj) return false;
@@ -268,6 +269,20 @@ export function cleanupOldVoiceMessages(maxAgeSeconds = 86400) {
   }
   
   return initialLength - db.voiceMessages.length;
+}
+
+export function saveFileInfo(fileInfo) {
+  db.files.push(fileInfo);
+  save();
+}
+
+export function getFileInfo(fileId) {
+  return db.files.find(f => f.id === fileId) || null;
+}
+
+export function getOriginalFileName(filename) {
+  const file = db.files.find(f => f.filename === filename);
+  return file ? file.originalName : filename;
 }
 
 load();
