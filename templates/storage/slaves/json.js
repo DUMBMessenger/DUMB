@@ -83,7 +83,7 @@ export function saveToken(username, token, expires) {
 export function validateToken(token) {
   db.tokens = db.tokens.filter(t => t.expires > Date.now());
   const t = db.tokens.find(t => t.token === token);
-  return t ? t.username : null;
+  return Promise.resolve(t ? t.username : null);
 }
 
 export function saveMessage(msg) {
