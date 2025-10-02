@@ -631,6 +631,7 @@ const actionHandlers = {
         if (extension === '.png') mimeType = 'image/png';
         else if (extension === '.gif') mimeType = 'image/gif';
         else if (extension === '.webp') mimeType = 'image/webp';
+        else if (extension === '.jpg') mimeType = 'image/jpeg';
 
         logger.info("Avatar uploaded successfully", { username: user, filename: req.file.filename });
         return { 
@@ -1048,14 +1049,24 @@ const server = app.listen(config.server?.port || config.port, config.server?.hos
 });
 
 server.on("upgrade", (req, socket, head) => {
+    // Пробуем получить токен из заголовков
+    let token;
     const auth = req.headers.authorization?.split(" ") || [];
-    if (auth.length !== 2 || auth[0] !== "Bearer") {
+    if (auth.length === 2 && auth[0] === "Bearer") {
+        token = auth[1];
+    } else {
+        // Если нет в заголовках, пробуем из URL параметров
+        const url = new URL(req.url, `http://${req.headers.host}`);
+        token = url.searchParams.get('token');
+    }
+
+    if (!token) {
         socket.destroy();
         logger.warn("WebSocket upgrade failed: no auth", { ip: req.socket.remoteAddress });
         return;
     }
 
-    storage.validateToken(auth[1]).then(user => {
+    storage.validateToken(token).then(user => {
         if (!user) {
             socket.destroy();
             logger.warn("WebSocket upgrade failed: invalid token", { ip: req.socket.remoteAddress });

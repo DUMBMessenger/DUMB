@@ -259,7 +259,7 @@ export function getVoiceMessageDuration(voiceId) {
   return voiceMsg ? voiceMsg.duration : 0;
 }
 
-export function cleanupOldVoiceMessages(maxAgeSeconds = 86400) {
+export async function cleanupOldVoiceMessages(maxAgeSeconds = 86400) {
   const cutoff = Date.now() - (maxAgeSeconds * 1000);
   const initialLength = db.voiceMessages.length;
   db.voiceMessages = db.voiceMessages.filter(v => v.timestamp > cutoff);
