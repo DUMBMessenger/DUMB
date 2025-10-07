@@ -1,6 +1,6 @@
 {
   "name": "dpkgdumb",
-  "version": "1.0.35",
+  "version": "1.0.36",
   "description": "Lightweight Decentralised Messenger",
   "type": "module",
   "bin": {
@@ -32,9 +32,9 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/debianrose/dumb.git"
+    "url": "git+https://github.com/DUMBMessenger/dumb.git"
   },
-  "homepage": "https://github.com/debianrose/dumb",
+  "homepage": "https://github.com/debianrose/",
   "keywords": [
     "installer",
     "scaffold",
