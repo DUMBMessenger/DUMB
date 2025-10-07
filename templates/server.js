@@ -872,6 +872,7 @@ const createEndpoint = (method, path, middleware, action, paramMap = null) => {
     });
 };
 
+
 createEndpoint('post', '/api/register', limiter(), 'register');
 createEndpoint('post', '/api/login', limiter(), 'login');
 createEndpoint('post', '/api/2fa/verify-login', limiter(), 'verify2FALogin');
@@ -899,6 +900,10 @@ createEndpoint('get', '/api/webrtc/answer', require2FAMiddleware, 'getWebRTCAnsw
 createEndpoint('get', '/api/webrtc/ice-candidates', require2FAMiddleware, 'getICECandidates', req => req.query);
 createEndpoint('post', '/api/webrtc/end-call', require2FAMiddleware, 'webrtcEndCall');
 createEndpoint('post', '/api/voice/upload', require2FAMiddleware, 'uploadVoiceMessage');
+
+app.get("/api/ping", (req, res) => {
+    res.json({ success: true, message: "pong" });
+});
 
 app.post("/api/upload/avatar", require2FAMiddleware, avatarUpload.single("avatar"), async (req, res) => {
     try {
@@ -943,22 +948,32 @@ app.get("/api/user/:username/avatar", async (req, res) => {
     }
 });
 
-app.post("/api/upload/voice/:voiceId", require2FAMiddleware, (req, res) => {
-    const voiceId = req.params.voiceId;
-    const filePath = path.join(config.uploads.dir, voiceId);
-    
-    const writeStream = fs.createWriteStream(filePath);
-    req.pipe(writeStream);
+app.post("/api/upload/voice/:voiceId", require2FAMiddleware, multer().single('voice'), async (req, res) => {
+    try {
+        const voiceId = req.params.voiceId;
+        
+        if (!req.file) {
+            return res.status(400).json({ success: false, error: "No file uploaded" });
+        }
 
-    writeStream.on('finish', () => {
-        logger.info("Voice message uploaded", { user: req.user, voiceId, size: fs.statSync(filePath).size });
+        const filePath = path.join(config.uploads.dir, voiceId);
+        await fs.promises.writeFile(filePath, req.file.buffer);
+
+        logger.info("Voice message uploaded", { 
+            user: req.user, 
+            voiceId, 
+            size: req.file.size 
+        });
+        
         res.json({ success: true, voiceId });
-    });
-
-    writeStream.on('error', (error) => {
-        logger.error("Voice message upload failed", { user: req.user, voiceId, error: error.message });
+    } catch (error) {
+        logger.error("Voice message upload failed", { 
+            user: req.user, 
+            voiceId: req.params.voiceId, 
+            error: error.message 
+        });
         res.status(500).json({ success: false, error: "upload failed" });
-    });
+    }
 });
 
 app.get("/api/download/:filename", (req, res) => {
