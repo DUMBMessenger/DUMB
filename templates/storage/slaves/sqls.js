@@ -337,6 +337,19 @@ export async function getChannels(username) {
   return result.rows;
 }
 
+export async function updateChannelName(oldName, newName, username) {
+  const channel = await queryOne("SELECT * FROM channels WHERE name = ?", [oldName]);
+  if (!channel) return false;
+
+  if (channel.creator !== username) return false;
+
+  const existing = await queryOne("SELECT id FROM channels WHERE name = ?", [newName]);
+  if (existing) return false;
+
+  const result = await query("UPDATE channels SET name = ? WHERE id = ?", [newName, channel.id]);
+  return result.affectedRows > 0;
+}
+
 export async function searchChannels(query) {
   const result = await query(
     `SELECT * FROM channels WHERE LOWER(name) LIKE LOWER(?)`,

@@ -457,6 +457,33 @@ const actionHandlers = {
         return { success: true, members };
     },
 
+    updateChannel: async ({ name, newName }, user) => {
+        if (!user) {
+            logger.warn("Update channel failed: not authenticated");
+            return { error: "not auth" };
+        }
+
+        if (!name || !newName || typeof newName !== "string" || newName.trim().length < 2) {
+            logger.warn("Update channel failed: invalid parameters", { user, name, newName });
+            return { error: "invalid parameters" };
+        }
+
+        const isMember = await storage.isChannelMember(name, user);
+        if (!isMember) {
+            logger.warn("Update channel failed: not a member", { user, name });
+            return { error: "not a member" };
+        }
+
+        const updated = await storage.updateChannelName(name.trim(), newName.trim(), user);
+        if (!updated) {
+            logger.warn("Update channel failed: could not update", { user, name, newName });
+            return { error: "update failed" };
+        }
+
+        logger.info("Channel name updated successfully", { user, oldName: name, newName });
+        return { success: true, oldName: name, newName };
+    },
+
     getMessages: async ({ channel, limit = 50, before }, user) => {
         if (!user || !channel || typeof channel !== "string") {
             logger.warn("Messages fetch failed: invalid parameters", { username: user, channel });
@@ -886,6 +913,10 @@ createEndpoint('post', '/api/message/voice-only', channelAuthMiddleware, 'sendVo
 createEndpoint('get', '/api/messages', channelAuthMiddleware, 'getMessages', req => req.query);
 createEndpoint('post', '/api/channels/create', require2FAMiddleware, 'createChannel');
 createEndpoint('get', '/api/channels', require2FAMiddleware, 'getChannels');
+createEndpoint('patch', '/api/channels', require2FAMiddleware, 'updateChannel', req => ({
+    name: req.query.name,
+    newName: req.body.newName
+}));
 createEndpoint('post', '/api/channels/join', require2FAMiddleware, 'joinChannel');
 createEndpoint('post', '/api/channels/join-by-id', require2FAMiddleware, 'joinChannel');
 createEndpoint('post', '/api/channels/leave', require2FAMiddleware, 'leaveChannel');

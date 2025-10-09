@@ -123,6 +123,22 @@ export function getChannels(username) {
   );
 }
 
+export function updateChannelName(oldName, newName, username) {
+  const channel = db.channels.find(c => c.name === oldName);
+  if (!channel) return false;
+  if (channel.creator !== username) return false;
+  if (db.channels.find(c => c.name === newName)) return false;
+  channel.name = newName;
+  db.channelMembers.forEach(cm => {
+    if (cm.channel === channel.id) cm.channel = channel.id;
+  });
+  db.messages.forEach(m => {
+    if (m.channel === oldName) m.channel = newName;
+  });
+  save();
+  return true;
+}
+
 export function searchChannels(query) {
   if (query === "" || query === "%") {
     return db.channels;
