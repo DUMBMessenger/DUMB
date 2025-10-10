@@ -71,7 +71,7 @@ async function runInstaller() {
 
   try {
     console.log("\n📥 Cloning repository from GitHub...");
-    execSync("git clone https://github.com/debianrose/dumb.git temp_repo", { stdio: "inherit" });
+    execSync("git clone https://github.com/dumbmessenger/dumb.git temp_repo", { stdio: "inherit" });
     
     const templatesPath = "temp_repo/templates";
     if (!fs.existsSync(templatesPath)) {
@@ -110,11 +110,11 @@ async function runInstaller() {
     console.log("⚙️  Creating configuration...");
     const configContent = `export default {
   github: {
-    owner: "debianrose",
+    owner: "dumbmessenger",
     repo: "dumb"
   },
   npm: {
-    packageName: "dumb-messenger"
+    packageName: "dpkgdumb"
   },
   server: {
     host: "0.0.0.0",

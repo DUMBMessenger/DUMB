@@ -23,7 +23,7 @@ Working <b> SQLs Databases (SQLite, MySQL) </b>
 
 <b> Universal API (HTML, WS, SSE) </b>
 
-<b> Working Encryption (SHA-256) </b>
+<b> Working Encryption (SHA-256, AES) </b>
 
 ### Our Socials
 [Telegram Chat](t.me/dpkgdumb) (English Only!)
