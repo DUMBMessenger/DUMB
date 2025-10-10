@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+// created by debianrose
 import fs from "fs";
 import path from "path";
 import { execSync } from "child_process";
@@ -85,21 +85,18 @@ async function runInstaller() {
 
     console.log("📋 Copying template files...");
     
-    // Copy main server file
     const serverSrc = path.join(templatesPath, "server.js");
     const serverDest = path.join(projectPath, "server.js");
     if (fs.existsSync(serverSrc)) {
       fs.copyFileSync(serverSrc, serverDest);
     }
 
-    // Copy storage files
     const storageSrc = path.join(templatesPath, "storage", "storage.js");
     const storageDest = path.join(projectPath, "storage", "storage.js");
     if (fs.existsSync(storageSrc)) {
       fs.copyFileSync(storageSrc, storageDest);
     }
 
-    // Copy slave files
     const slavesSrcDir = path.join(templatesPath, "storage", "slaves");
     if (fs.existsSync(slavesSrcDir)) {
       const slaveFiles = fs.readdirSync(slavesSrcDir);
@@ -116,6 +113,9 @@ async function runInstaller() {
     owner: "debianrose",
     repo: "dumb"
   },
+  npm: {
+    packageName: "dumb-messenger"
+  },
   server: {
     host: "0.0.0.0",
     port: ${answers.port}
@@ -125,7 +125,10 @@ async function runInstaller() {
     ws: ${answers.websocket === "enable"},
     sse: ${answers.sse === "enable"},
     voip: ${answers.voip === "enable"},
-    uploads: ${answers.uploads === "enable"}
+    uploads: ${answers.uploads === "enable"},
+    webRTC: ${answers.voip === "enable"},
+    twoFactor: true,
+    voiceMessages: true
   },
   security: {
     passwordMinLength: 8,
@@ -135,16 +138,24 @@ async function runInstaller() {
       keylen: 32,
       digest: "sha256"
     },
+    encryptionKey: process.env.ENCRYPTION_KEY || "your-default-encryption-key-change-in-production",
+    usernameRegex: /^[a-zA-Z0-9_-]{3,20}$/,
     maxMessageLength: 2000
   },
   storage: {
     type: "${answers.dbType}",
-    file: "db.json"
+    file: "${answers.dbType === 'mysql' ? 'dumb_messenger' : 'db.sqlite'}",
+    ${answers.dbType === 'mysql' ? `
+    host: "localhost",
+    port: 3306,
+    user: "root",
+    password: "",
+    database: "dumb_messenger"` : ''}
   },
   uploads: {
     dir: "uploads",
-    maxFileSize: 2 * 1024 * 1024,
-    allowedMime: ["image/png", "image/jpeg", "image/webp", "image/gif"]
+    maxFileSize: 10 * 1024 * 1024,
+    allowedMime: ["image/png", "image/jpeg", "image/webp", "image/gif", "audio/ogg", "audio/wav", "audio/mpeg"]
   },
   cors: {
     origin: "*"
@@ -152,22 +163,28 @@ async function runInstaller() {
   rateLimit: {
     windowMs: 60 * 1000,
     max: 60
+  },
+  ws: {
+    port: ${parseInt(answers.port) + 1}
   }
-}`;
+};`;
 
     fs.writeFileSync(path.join(projectPath, "config.js"), configContent);
 
-    console.log("📦 Installing dependencies...");
+    console.log("📦 Creating package.json...");
     const packageJson = {
       name: "dumb-messenger",
       version: "1.0.0",
       type: "module",
-      scripts: { start: "node server.js" },
+      scripts: {
+        start: "node server.js",
+        dev: "node --watch server.js"
+      },
       dependencies: {
         express: "^4.18.2",
         ws: "^8.17.0",
         "sql.js": "^1.8.0",
-        mysql2: "^3.9.7",
+        "mysql2": "^3.9.7",
         multer: "^1.4.4",
         cors: "^2.8.5",
         qrcode: "^1.5.4",
@@ -180,17 +197,45 @@ async function runInstaller() {
       JSON.stringify(packageJson, null, 2)
     );
 
-    console.log(gradient("gray", "white")("DUMB Installation complete!"));
+    fs.mkdirSync(path.join(projectPath, "uploads"), { recursive: true });
 
+    const envExample = `ENCRYPTION_KEY=your-secure-encryption-key-here
+${answers.dbType === 'mysql' ? `
+DB_HOST=localhost
+DB_PORT=3306
+DB_USER=root
+DB_PASSWORD=your-mysql-password
+DB_NAME=dumb_messenger` : ''}`;
+
+    fs.writeFileSync(path.join(projectPath, ".env.example"), envExample);
+
+    console.log("📦 Installing dependencies...");
     execSync("npm install", { cwd: projectPath, stdio: "inherit" });
+
     console.log("🧹 Cleaning up...");
     execSync("rm -rf temp_repo", { stdio: "inherit" });
 
-    console.log("h")
+    console.log(gradient("green", "blue").multiline([
+      "\n✅ DUMB Messenger installed successfully!",
+      "",
+      "📋 Next steps:",
+      `1. cd ${answers.folder}`,
+      "2. Configure your database (if using MySQL)",
+      "3. Set ENCRYPTION_KEY in environment variables",
+      "4. npm start",
+      "",
+      "🌐 Your server will be available at:",
+      `   http://localhost:${answers.port}`
+    ]));
 
   } catch (err) {
     console.error("❌ Installation failed:", err);
-    try { execSync("rm -rf temp_repo"); } catch {}
+    try { 
+      execSync("rm -rf temp_repo"); 
+      if (fs.existsSync(projectPath)) {
+        execSync(`rm -rf ${projectPath}`);
+      }
+    } catch {}
     process.exit(1);
   }
 }
