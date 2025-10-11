@@ -1,4 +1,3 @@
-//where you head at?
 import config from "../config.js";
 import * as jsonBackend from "./slaves/json.js";
 import * as sqlsBackend from "./slaves/sqls.js";
@@ -16,7 +15,7 @@ if (config.storage.type === "json") {
 
 const usernameRegex = /^[a-zA-Z0-9_-]{3,20}$/;
 
-const validateUsername = (username) => {
+export const validateUsername = (username) => {
   return usernameRegex.test(username);
 };
 
@@ -35,7 +34,7 @@ const encryptMessage = (text, key) => {
 };
 
 const decryptMessage = (encryptedData, key) => {
-  if (!key || !encryptedData.encrypted) return encryptedData;
+  if (!key || !encryptedData.encrypted) return encryptedData.content || encryptedData;
   
   try {
     const iv = Buffer.from(encryptedData.iv, 'hex');
@@ -70,7 +69,7 @@ export const getMessages = async (channel, limit, before) => {
   const messages = await backend.getMessages(channel, limit, before);
   
   return messages.map(msg => {
-    if (msg.encrypted && config.security.encryptionKey) {
+    if (msg.encrypted && config.security.encryptionKey && typeof msg.text === 'object') {
       try {
         msg.text = decryptMessage(msg.text, config.security.encryptionKey);
         msg.encrypted = false;
@@ -108,4 +107,3 @@ export const cleanupOldVoiceMessages = backend.cleanupOldVoiceMessages;
 export const saveFileInfo = backend.saveFileInfo;
 export const getFileInfo = backend.getFileInfo;
 export const getOriginalFileName = backend.getOriginalFileName;
-export const validateUsername = validateUsername;
