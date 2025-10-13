@@ -10,6 +10,9 @@ import * as storage from "./storage/storage.js";
 import speakeasy from "speakeasy";
 import QRCode from "qrcode";
 import https from "https";
+import { anse2_encrypt_wasm, anse2_decrypt_wasm, anse2_init_wasm } from "@akaruineko1/anse2";
+
+anse2_init_wasm();
 
 const app = express();
 app.use(cors({ origin: config.cors.origin }));
@@ -532,13 +535,10 @@ const actionHandlers = {
 
         if (encrypt && config.security.encryptionKey && processedText) {
             try {
-                processedText = {
-                    iv: crypto.randomBytes(16).toString('hex'),
-                    content: crypto.createCipher('aes-256-cbc', config.security.encryptionKey)
-                        .update(processedText, 'utf8', 'hex') + 
-                        crypto.createCipher('aes-256-cbc', config.security.encryptionKey).final('hex'),
-                    encrypted: true
-                };
+                const encoder = new TextEncoder();
+                const inputBytes = encoder.encode(processedText);
+                const encryptedBytes = anse2_encrypt_wasm(inputBytes, config.security.encryptionKey);
+                processedText = Buffer.from(encryptedBytes).toString('base64');
                 isEncrypted = true;
             } catch (error) {
                 logger.error("Message encryption failed", { user, channel, error: error.message });
@@ -585,8 +585,10 @@ const actionHandlers = {
         
         if (isEncrypted && config.security.encryptionKey) {
             try {
-                const decipher = crypto.createDecipher('aes-256-cbc', config.security.encryptionKey);
-                saved.text = decipher.update(saved.text.content, 'hex', 'utf8') + decipher.final('utf8');
+                const encryptedBytes = Buffer.from(saved.text, 'base64');
+                const decryptedBytes = anse2_decrypt_wasm(encryptedBytes, config.security.encryptionKey);
+                const decoder = new TextDecoder();
+                saved.text = decoder.decode(decryptedBytes);
                 saved.encrypted = false;
             } catch (error) {
                 logger.warn("Failed to decrypt saved message for broadcast", { messageId: saved.id, error: error.message });

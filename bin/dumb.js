@@ -138,13 +138,13 @@ async function runInstaller() {
       keylen: 32,
       digest: "sha256"
     },
-    encryptionKey: process.env.ENCRYPTION_KEY || "your-default-encryption-key-change-in-production",
+    encryptionKey: process.env.ENCRYPTION_KEY || "your-encryption-key",
     usernameRegex: /^[a-zA-Z0-9_-]{3,20}$/,
     maxMessageLength: 2000
   },
   storage: {
     type: "${answers.dbType}",
-    file: "${answers.dbType === 'mysql' ? 'dumb_messenger' : 'db.sqlite'}",
+    file: "${answers.dbType === 'mysql' ? 'dumb_messenger' : 'db.json'}",
     ${answers.dbType === 'mysql' ? `
     host: "localhost",
     port: 3306,
@@ -181,6 +181,7 @@ async function runInstaller() {
         dev: "node --watch server.js"
       },
       dependencies: {
+        "@akaruineko1/anse2": "^0.1.0",
         express: "^4.18.2",
         ws: "^8.17.0",
         "sql.js": "^1.8.0",
