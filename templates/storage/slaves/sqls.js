@@ -301,5 +301,9 @@ export function getOriginalFileName(filename) {
   return file ? file.originalName : filename;
 }
 
+export function getMessageById(messageId) {
+  return db.messages.find(m => m.id === messageId) || null;
+}
+
 load();
 setInterval(save, 30000);

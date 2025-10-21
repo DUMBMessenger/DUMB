@@ -1,14 +1,17 @@
 import express from "express";
 import cors from "cors";
 import multer from "multer";
-import { WebSocketServer } from "ws";
-import crypto from "crypto";
+import { WebSocketServer } from "./modules/websocket.js";
+import { Crypto as crypto } from "./modules/crypto.js";
 import fs from "fs";
 import path from "path";
 import config from "./config.js";
 import * as storage from "./storage/storage.js";
-import speakeasy from "speakeasy";
-import QRCode from "qrcode";
+import { TOTP as speakeasy } from "./modules/speakeasy.js";
+import { QRCode } from "./modules/qrcode.js";
+import { Logger } from "./modules/logger.js";
+import { RateLimiter } from "./modules/limiter.js";
+import { SSEServer } from "./modules/sse.js";
 import https from "https";
 import { anse2_encrypt_wasm, anse2_decrypt_wasm, anse2_init_wasm } from "@akaruineko1/anse2";
 
@@ -222,7 +225,7 @@ const actionHandlers = {
             }
 
             const secret = await storage.getTwoFactorSecret(username);
-            const verified = speakeasy.totp.verify({
+            const verified = speakeasy.verify({
                 secret: secret,
                 encoding: 'base32',
                 token: twoFactorToken,
@@ -269,7 +272,7 @@ const actionHandlers = {
         }
 
         const secret = await storage.getTwoFactorSecret(username);
-        const verified = speakeasy.totp.verify({
+        const verified = speakeasy.verify({
             secret: secret,
             encoding: 'base32',
             token: twoFactorToken,
@@ -327,7 +330,7 @@ const actionHandlers = {
             return { error: "setup required" };
         }
 
-        const verified = speakeasy.totp.verify({
+        const verified = speakeasy.verify({
             secret: secret,
             encoding: 'base32',
             token: token,
@@ -492,128 +495,193 @@ const actionHandlers = {
     },
 
     getMessages: async ({ channel, limit = 50, before }, user) => {
-        if (!user || !channel || typeof channel !== "string") {
-            logger.warn("Messages fetch failed: invalid parameters", { username: user, channel });
-            return { error: "invalid parameters" };
-        }
+    if (!user || !channel || typeof channel !== "string") {
+        logger.warn("Messages fetch failed: invalid parameters", { username: user, channel });
+        return { error: "invalid parameters" };
+    }
 
-        if (!await storage.isChannelMember(channel, user)) {
-            logger.warn("Get messages failed: not channel member", { user, channel });
-            return { error: "not a channel member" };
-        }
+    if (!await storage.isChannelMember(channel, user)) {
+        logger.warn("Get messages failed: not channel member", { user, channel });
+        return { error: "not a channel member" };
+    }
 
-        const messages = await storage.getMessages(channel, Math.min(limit, 100), before);
+    const messages = await storage.getMessages(channel, Math.min(limit, 100), before);
+    
+    for (let message of messages) {
+        if (message.voice && message.voice.filename) {
+            message.voice.duration = await storage.getVoiceMessageDuration(message.voice.filename) || 0;
+        }
         
-        for (let message of messages) {
-            if (message.voice && message.voice.filename) {
-                message.voice.duration = await storage.getVoiceMessageDuration(message.voice.filename) || 0;
-            }
-        }
-        
-        logger.info("Messages retrieved", { username: user, channel, count: messages.length });
-        return { success: true, messages };
-    },
-
-    sendMessage: async ({ channel, text, replyTo, fileId, voiceMessage, encrypt = false }, user) => {
-        if (!user || !channel) {
-            logger.warn("Message send failed: invalid parameters", { username: user, channel });
-            return { error: "bad input" };
-        }
-
-        if (!text && !fileId && !voiceMessage) {
-            logger.warn("Message send failed: no content", { username: user, channel });
-            return { error: "no content" };
-        }
-
-        if (!await storage.isChannelMember(channel, user)) {
-            logger.warn("Send message failed: not channel member", { user, channel });
-            return { error: "not a channel member" };
-        }
-
-        let processedText = text ? text.trim().slice(0, config.security.maxMessageLength || 1000) : "";
-        let isEncrypted = false;
-
-        if (encrypt && config.security.encryptionKey && processedText) {
-            try {
-                const encoder = new TextEncoder();
-                const inputBytes = encoder.encode(processedText);
-                const encryptedBytes = anse2_encrypt_wasm(inputBytes, config.security.encryptionKey);
-                processedText = Buffer.from(encryptedBytes).toString('base64');
-                isEncrypted = true;
-            } catch (error) {
-                logger.error("Message encryption failed", { user, channel, error: error.message });
-                return { error: "encryption failed" };
-            }
-        }
-
-        let fileAttachment = null;
-        if (fileId) {
-            const fileInfo = await storage.getFileInfo(fileId);
-            if (fileInfo) {
-                fileAttachment = {
-                    filename: fileInfo.filename,
-                    originalName: fileInfo.originalName,
-                    mimetype: fileInfo.mimetype,
-                    size: fileInfo.size,
-                    downloadUrl: `/api/download/${fileInfo.filename}`
+        if (message.replyTo && !message.replyToMessage) {
+            const parentMessage = await storage.getMessageById(message.replyTo);
+            if (parentMessage) {
+                message.replyToMessage = {
+                    id: parentMessage.id,
+                    from: parentMessage.from,
+                    text: parentMessage.text?.substring(0, 100) + (parentMessage.text?.length > 100 ? '...' : ''),
+                    ts: parentMessage.ts,
+                    hasFile: !!parentMessage.file,
+                    hasVoice: !!parentMessage.voice
                 };
             }
         }
+    }
+    
+    logger.info("Messages retrieved", { username: user, channel, count: messages.length });
+    return { success: true, messages };
+    },
 
-        let voiceAttachment = null;
-        if (voiceMessage) {
-            const duration = await storage.getVoiceMessageDuration(voiceMessage) || 0;
-            voiceAttachment = {
-                filename: voiceMessage,
-                duration: duration,
-                downloadUrl: `/api/download/${voiceMessage}`
+   getMessage: async ({ messageId }, user) => {
+    if (!user || !messageId) {
+        logger.warn("Get message failed: invalid parameters", { username: user, messageId });
+        return { error: "invalid parameters" };
+    }
+
+    const message = await storage.getMessageById(messageId);
+    if (!message) {
+        logger.warn("Message not found", { username: user, messageId });
+        return { error: "message not found" };
+    }
+
+    if (!await storage.isChannelMember(message.channel, user)) {
+        logger.warn("Get message failed: not channel member", { user, channel: message.channel });
+        return { error: "not a channel member" };
+    }
+
+    logger.info("Message retrieved", { username: user, messageId });
+    return { success: true, message };
+   },
+
+   sendMessage: async ({ channel, text, replyTo, fileId, voiceMessage, encrypt = false }, user) => {
+    if (!user || !channel) {
+        logger.warn("Message send failed: invalid parameters", { username: user, channel });
+        return { error: "bad input" };
+    }
+
+    if (!text && !fileId && !voiceMessage) {
+        logger.warn("Message send failed: no content", { username: user, channel });
+        return { error: "no content" };
+    }
+
+    if (!await storage.isChannelMember(channel, user)) {
+        logger.warn("Send message failed: not channel member", { user, channel });
+        return { error: "not a channel member" };
+    }
+
+    let replyToMessage = null;
+    if (replyTo) {
+        replyToMessage = await storage.getMessageById(replyTo);
+        if (!replyToMessage) {
+            logger.warn("Reply to message not found", { replyTo, user, channel });
+            return { error: "reply message not found" };
+        }
+        if (replyToMessage.channel !== channel) {
+            logger.warn("Reply to message from different channel", { replyTo, user, channel });
+            return { error: "reply message from different channel" };
+        }
+    }
+
+    let processedText = text ? text.trim().slice(0, config.security.maxMessageLength || 1000) : "";
+    let isEncrypted = false;
+
+    if (encrypt && config.security.encryptionKey && processedText) {
+        try {
+            const encoder = new TextEncoder();
+            const inputBytes = encoder.encode(processedText);
+            const encryptedBytes = anse2_encrypt_wasm(inputBytes, config.security.encryptionKey);
+            processedText = Buffer.from(encryptedBytes).toString('base64');
+            isEncrypted = true;
+        } catch (error) {
+            logger.error("Message encryption failed", { user, channel, error: error.message });
+            return { error: "encryption failed" };
+        }
+    }
+
+    let fileAttachment = null;
+    if (fileId) {
+        const fileInfo = await storage.getFileInfo(fileId);
+        if (fileInfo) {
+            fileAttachment = {
+                filename: fileInfo.filename,
+                originalName: fileInfo.originalName,
+                mimetype: fileInfo.mimetype,
+                size: fileInfo.size,
+                downloadUrl: `/api/download/${fileInfo.filename}`
             };
         }
+    }
 
-        const msg = {
-            from: user,
-            channel: channel,
-            text: processedText,
-            ts: Date.now(),
-            replyTo: replyTo || null,
-            file: fileAttachment,
-            voice: voiceAttachment,
-            encrypted: isEncrypted
+    let voiceAttachment = null;
+    if (voiceMessage) {
+        const duration = await storage.getVoiceMessageDuration(voiceMessage) || 0;
+        voiceAttachment = {
+            filename: voiceMessage,
+            duration: duration,
+            downloadUrl: `/api/download/${voiceMessage}`
         };
+    }
 
-        const saved = await storage.saveMessage(msg);
-        
-        if (isEncrypted && config.security.encryptionKey) {
-            try {
-                const encryptedBytes = Buffer.from(saved.text, 'base64');
-                const decryptedBytes = anse2_decrypt_wasm(encryptedBytes, config.security.encryptionKey);
-                const decoder = new TextDecoder();
-                saved.text = decoder.decode(decryptedBytes);
-                saved.encrypted = false;
-            } catch (error) {
-                logger.warn("Failed to decrypt saved message for broadcast", { messageId: saved.id, error: error.message });
-                saved.text = "[encrypted message]";
-            }
+    const msg = {
+        from: user,
+        channel: channel,
+        text: processedText,
+        ts: Date.now(),
+        replyTo: replyTo || null,
+        replyToMessage: replyToMessage ? {
+            id: replyToMessage.id,
+            from: replyToMessage.from,
+            text: replyToMessage.text,
+            ts: replyToMessage.ts,
+            hasFile: !!replyToMessage.file,
+            hasVoice: !!replyToMessage.voice
+        } : null,
+        file: fileAttachment,
+        voice: voiceAttachment,
+        encrypted: isEncrypted
+    };
+
+    const saved = await storage.saveMessage(msg);
+    
+    if (isEncrypted && config.security.encryptionKey) {
+        try {
+            const encryptedBytes = Buffer.from(saved.text, 'base64');
+            const decryptedBytes = anse2_decrypt_wasm(encryptedBytes, config.security.encryptionKey);
+            const decoder = new TextDecoder();
+            saved.text = decoder.decode(decryptedBytes);
+            saved.encrypted = false;
+        } catch (error) {
+            logger.warn("Failed to decrypt saved message for broadcast", { messageId: saved.id, error: error.message });
+            saved.text = "[encrypted message]";
         }
-        
-        const messageToSend = {
-            ...saved,
-            type: "message",
-            action: "new"
-        };
+    }
+    
+    const messageToSend = {
+        ...saved,
+        type: "message",
+        action: "new"
+    };
 
-        wsClients.forEach(client => {
-            if (client.readyState === 1) {
-                client.send(JSON.stringify(messageToSend));
-            }
-        });
+    wsClients.forEach(client => {
+        if (client.readyState === 1) {
+            client.send(JSON.stringify(messageToSend));
+        }
+    });
 
-        sseClients.forEach(client => {
-            client.res.write(`data: ${JSON.stringify(messageToSend)}\n\n`);
-        });
+    sseClients.forEach(client => {
+        client.res.write(`data: ${JSON.stringify(messageToSend)}\n\n`);
+    });
 
-        logger.info("Message sent", { username: user, channel, messageId: saved.id, hasFile: !!fileId, hasVoice: !!voiceMessage, hasText: !!text, encrypted: isEncrypted });
-        return { success: true, message: saved };
+    logger.info("Message sent", { 
+        username: user, 
+        channel, 
+        messageId: saved.id, 
+        hasFile: !!fileId, 
+        hasVoice: !!voiceMessage, 
+        hasText: !!text, 
+        encrypted: isEncrypted,
+        isReply: !!replyTo 
+    });
+    return { success: true, message: saved };
     },
 
     sendVoiceOnly: async ({ channel, voiceMessage }, user) => {
@@ -948,6 +1016,7 @@ createEndpoint('get', '/api/updates/check', require2FAMiddleware, 'getUpdates');
 createEndpoint('post', '/api/message', channelAuthMiddleware, 'sendMessage');
 createEndpoint('post', '/api/message/voice-only', channelAuthMiddleware, 'sendVoiceOnly');
 createEndpoint('get', '/api/messages', channelAuthMiddleware, 'getMessages', req => req.query);
+createEndpoint('get', '/api/message/:messageId', channelAuthMiddleware, 'getMessage');
 createEndpoint('post', '/api/channels/create', require2FAMiddleware, 'createChannel');
 createEndpoint('get', '/api/channels', require2FAMiddleware, 'getChannels');
 createEndpoint('patch', '/api/channels', require2FAMiddleware, 'updateChannel', req => ({

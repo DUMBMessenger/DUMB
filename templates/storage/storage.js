@@ -107,3 +107,4 @@ export const cleanupOldVoiceMessages = backend.cleanupOldVoiceMessages;
 export const saveFileInfo = backend.saveFileInfo;
 export const getFileInfo = backend.getFileInfo;
 export const getOriginalFileName = backend.getOriginalFileName;
+export const getMessageById = backend.getMessageById;
