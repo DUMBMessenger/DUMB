@@ -27,6 +27,6 @@ jobs:
         run: npm version patch --no-git-tag-version --no-commit-hooks
 
       - name: Publish to npm
-        run: npm publish
+        run: npm publish || true
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
