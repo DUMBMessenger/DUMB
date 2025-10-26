@@ -14,7 +14,10 @@ let db = {
   iceCandidates: [],
   twoFactorSecrets: [],
   voiceMessages: [],
-  files: []
+  files: [],
+  emailVerifications: [],
+  passwordResets: [],
+  bans: []
 };
 const file = config.storage.file;
 
@@ -57,7 +60,7 @@ export function registerUser(username, passwordPlain) {
   if (db.users.find(u => u.username === username)) return false;
   const salt = crypto.randomBytes(16).toString("hex");
   const passwordHash = pbkdf2(passwordPlain, salt);
-  db.users.push({ username, passwordHash, salt, avatar: null, twoFactorEnabled: false });
+  db.users.push({ username, passwordHash, salt, avatar: null, twoFactorEnabled: false, type: 'user' });
   save();
   return true;
 }
@@ -303,6 +306,107 @@ export function getOriginalFileName(filename) {
 
 export function getMessageById(messageId) {
   return db.messages.find(m => m.id === messageId) || null;
+}
+
+export function setUserEmail(username, email) {
+  const user = db.users.find(u => u.username === username);
+  if (!user) return false;
+  user.email = email;
+  user.emailVerified = true;
+  save();
+  return true;
+}
+
+export function getUserByEmail(email) {
+  const user = db.users.find(u => u.email === email);
+  return user ? user.username : null;
+}
+
+export function createEmailVerification(username, email, code) {
+  db.emailVerifications = db.emailVerifications.filter(v => v.expires > Date.now());
+  db.emailVerifications.push({
+    username,
+    email,
+    code,
+    expires: Date.now() + 24 * 60 * 60 * 1000
+  });
+  save();
+  return true;
+}
+
+export function verifyEmailCode(username, email, code) {
+  const verification = db.emailVerifications.find(v => 
+    v.username === username && v.email === email && v.code === code && v.expires > Date.now()
+  );
+  if (verification) {
+    db.emailVerifications = db.emailVerifications.filter(v => v !== verification);
+    save();
+    return true;
+  }
+  return false;
+}
+
+export function createPasswordReset(username, token) {
+  db.passwordResets = db.passwordResets.filter(r => r.expires > Date.now());
+  db.passwordResets.push({
+    username,
+    token,
+    expires: Date.now() + 60 * 60 * 1000
+  });
+  save();
+  return true;
+}
+
+export function usePasswordReset(token, newPassword) {
+  const reset = db.passwordResets.find(r => r.token === token && r.expires > Date.now());
+  if (!reset) return false;
+
+  const user = db.users.find(u => u.username === reset.username);
+  if (!user) return false;
+
+  const salt = crypto.randomBytes(16).toString("hex");
+  const passwordHash = pbkdf2(newPassword, salt);
+  user.passwordHash = passwordHash;
+  user.salt = salt;
+
+  db.passwordResets = db.passwordResets.filter(r => r !== reset);
+  save();
+  return true;
+}
+
+export function setUserType(username, type) {
+  const user = db.users.find(u => u.username === username);
+  if (!user) return false;
+  user.type = type;
+  save();
+  return true;
+}
+
+export function saveBan(banInfo) {
+  db.bans = db.bans.filter(b => b.expires > Date.now());
+  const existingIndex = db.bans.findIndex(b => b.username === banInfo.username);
+  if (existingIndex !== -1) {
+    db.bans[existingIndex] = banInfo;
+  } else {
+    db.bans.push(banInfo);
+  }
+  save();
+  return true;
+}
+
+export function getBan(username) {
+  db.bans = db.bans.filter(b => b.expires > Date.now());
+  return db.bans.find(b => b.username === username) || null;
+}
+
+export function removeBan(username) {
+  const initialLength = db.bans.length;
+  db.bans = db.bans.filter(b => b.username !== username);
+  if (db.bans.length !== initialLength) {
+    save();
+    return true;
+  }
+  return false;
 }
 
 load();

@@ -1,3 +1,5 @@
+import { Logger } from './logger.js';
+
 export class RateLimiter {
   constructor(windowMs, max) {
     this.windowMs = windowMs;

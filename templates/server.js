@@ -6,14 +6,16 @@ import { Crypto as crypto } from "./modules/crypto.js";
 import fs from "fs";
 import path from "path";
 import config from "./config.js";
+const emailService = new EmailService(config.email);
 import * as storage from "./storage/storage.js";
 import { TOTP as speakeasy } from "./modules/speakeasy.js";
 import { QRCode } from "./modules/qrcode.js";
-import { Logger } from "./modules/logger.js";
-import { RateLimiter } from "./modules/limiter.js";
 import { SSEServer } from "./modules/sse.js";
-import https from "https";
+import { EmailService } from './modules/email.js';
 import { anse2_encrypt_wasm, anse2_decrypt_wasm, anse2_init_wasm } from "@akaruineko1/anse2";
+import { RedisService } from "./modules/redis.js";
+import { Logger } from './modules/logger.js';
+import https from "https";
 
 anse2_init_wasm();
 
@@ -21,15 +23,11 @@ const app = express();
 app.use(cors({ origin: config.cors.origin }));
 app.use(express.json({ limit: "1mb" }));
 
-const logger = {
-    info: (message, meta = {}) => console.log(JSON.stringify({ level: "INFO", message, timestamp: new Date().toISOString(), ...meta })),
-    warn: (message, meta = {}) => console.warn(JSON.stringify({ level: "WARN", message, timestamp: new Date().toISOString(), ...meta })),
-    error: (message, meta = {}) => console.error(JSON.stringify({ level: "ERROR", message, timestamp: new Date().toISOString(), ...meta }))
-};
+const redisService = new RedisService(config.redis || { enabled: false });
+await redisService.connect();
 
 if (config.features.uploads && !fs.existsSync(config.uploads.dir)) {
     fs.mkdirSync(config.uploads.dir, { recursive: true });
-    logger.info("Uploads directory created", { path: config.uploads.dir });
 }
 
 const createUploader = (isAvatar = false) => multer({
@@ -62,18 +60,15 @@ const pending2FASessions = new Map();
 const authMiddleware = async (req, res, next) => {
     const auth = req.headers.authorization?.split(" ") || [];
     if (auth.length !== 2 || auth[0] !== "Bearer") {
-        logger.warn("Authentication failed: no bearer token", { ip: req.ip });
         return res.status(401).json({ error: "no auth" });
     }
 
     const user = await storage.validateToken(auth[1]);
     if (!user) {
-        logger.warn("Authentication failed: invalid token", { ip: req.ip });
         return res.status(401).json({ error: "invalid token" });
     }
 
     req.user = user;
-    logger.info("User authenticated", { username: user, ip: req.ip });
     next();
 };
 
@@ -83,7 +78,6 @@ const require2FAMiddleware = async (req, res, next) => {
         if (twoFactorEnabled) {
             const session = pending2FASessions.get(req.user);
             if (!session || !session.twoFactorVerified) {
-                logger.warn("2FA verification required", { username: req.user, ip: req.ip });
                 return res.status(403).json({ error: "2fa_required", message: "Two-factor authentication required" });
             }
         }
@@ -95,7 +89,6 @@ const channelAuthMiddleware = async (req, res, next) => {
     await require2FAMiddleware(req, res, async () => {
         const channel = req.body?.channel || req.query?.channel;
         if (channel && !await storage.isChannelMember(channel, req.user)) {
-            logger.warn("Channel access denied", { username: req.user, channel, ip: req.ip });
             return res.status(403).json({ error: "not a channel member" });
         }
         next();
@@ -112,9 +105,35 @@ const limiter = () => {
         hits.set(ip, fresh);
 
         if (fresh.length > config.rateLimit.max) {
-            logger.warn("Rate limit exceeded", { ip, hits: fresh.length });
             return res.status(429).json({ error: "rate limit" });
         }
+        next();
+    };
+};
+
+const cacheMiddleware = (ttlSeconds = 300) => {
+    return async (req, res, next) => {
+        if (!config.redis?.enabled) {
+            return next();
+        }
+
+        const cacheKey = `route:${req.method}:${req.originalUrl}:${req.user || 'anon'}`;
+        
+        try {
+            const cached = await redisService.get(cacheKey);
+            if (cached) {
+                return res.json(cached);
+            }
+        } catch (error) {}
+
+        const originalJson = res.json;
+        res.json = function(data) {
+            if (data.success && !data.error) {
+                redisService.set(cacheKey, data, ttlSeconds).catch(err => {});
+            }
+            originalJson.call(this, data);
+        };
+
         next();
     };
 };
@@ -153,7 +172,6 @@ const checkNPMUpdates = async () => {
             });
 
             req.on('error', (error) => {
-                logger.error("NPM API error", { error: error.message });
                 resolve(null);
             });
 
@@ -165,7 +183,6 @@ const checkNPMUpdates = async () => {
             req.end();
         });
     } catch (error) {
-        logger.error("NPM update check error", { error: error.message });
         return null;
     }
 };
@@ -173,22 +190,18 @@ const checkNPMUpdates = async () => {
 const actionHandlers = {
     register: async ({ username, password }, user) => {
         if (typeof username !== "string" || typeof password !== "string") {
-            logger.warn("Register failed: bad input", { username: username?.substring(0, 10) });
             return { error: "bad input" };
         }
 
         if (!storage.validateUsername(username.trim())) {
-            logger.warn("Register failed: invalid username format", { username: username.trim() });
             return { error: "invalid username format" };
         }
 
         try {
             const result = await storage.registerUser(username.trim(), password.trim());
             if (result) {
-                logger.info("User registered successfully", { username: username.trim() });
                 return { success: true };
             } else {
-                logger.warn("Register failed: user exists", { username: username.trim() });
                 return { error: "user exists" };
             }
         } catch (error) {
@@ -199,7 +212,6 @@ const actionHandlers = {
     login: async ({ username, password, twoFactorToken }, user) => {
         const u = await storage.authenticate(username, password);
         if (!u) {
-            logger.warn("Login failed: invalid credentials", { username });
             return { error: "login failed" };
         }
 
@@ -215,7 +227,6 @@ const actionHandlers = {
                     createdAt: Date.now()
                 });
                 
-                logger.info("2FA required for login", { username, sessionId });
                 return { 
                     success: false, 
                     requires2FA: true,
@@ -233,7 +244,6 @@ const actionHandlers = {
             });
 
             if (!verified) {
-                logger.warn("2FA verification failed", { username });
                 return { error: "invalid 2fa token" };
             }
 
@@ -249,25 +259,21 @@ const actionHandlers = {
         
         pending2FASessions.delete(username);
         
-        logger.info("User logged in successfully", { username, twoFactorEnabled });
         return { success: true, token, twoFactorEnabled };
     },
 
     verify2FALogin: async ({ username, sessionId, twoFactorToken }, user) => {
         if (!username || !sessionId || !twoFactorToken) {
-            logger.warn("2FA verification failed: missing parameters", { username });
             return { error: "missing parameters" };
         }
 
         const session = pending2FASessions.get(username);
         if (!session || session.sessionId !== sessionId) {
-            logger.warn("2FA verification failed: invalid session", { username, sessionId });
             return { error: "invalid session" };
         }
 
         if (Date.now() - session.createdAt > 5 * 60 * 1000) {
             pending2FASessions.delete(username);
-            logger.warn("2FA verification failed: session expired", { username });
             return { error: "session expired" };
         }
 
@@ -280,7 +286,6 @@ const actionHandlers = {
         });
 
         if (!verified) {
-            logger.warn("2FA verification failed: invalid token", { username });
             return { error: "invalid 2fa token" };
         }
 
@@ -290,7 +295,6 @@ const actionHandlers = {
         const token = genToken();
         await storage.saveToken(username, token, Date.now() + config.security.tokenTTL);
         
-        logger.info("2FA login verified successfully", { username });
         return { 
             success: true, 
             token, 
@@ -301,7 +305,6 @@ const actionHandlers = {
 
     setup2FA: async (data, user) => {
         if (!user) {
-            logger.warn("2FA setup failed: not authenticated");
             return { error: "not auth" };
         }
 
@@ -314,19 +317,16 @@ const actionHandlers = {
         
         const qrCodeUrl = await QRCode.toDataURL(secret.otpauth_url);
         
-        logger.info("2FA setup initiated", { user });
         return { success: true, secret: secret.base32, qrCodeUrl };
     },
 
     enable2FA: async ({ token }, user) => {
         if (!user) {
-            logger.warn("2FA enable failed: not authenticated");
             return { error: "not auth" };
         }
 
         const secret = await storage.getTwoFactorSecret(user);
         if (!secret) {
-            logger.warn("2FA enable failed: no secret found", { username: user });
             return { error: "setup required" };
         }
 
@@ -338,37 +338,31 @@ const actionHandlers = {
         });
 
         if (!verified) {
-            logger.warn("2FA enable failed: invalid token", { username: user });
             return { error: "invalid token" };
         }
 
         await storage.enableTwoFactor(user, true);
-        logger.info("2FA enabled successfully", { username: user });
         return { success: true };
     },
 
     disable2FA: async ({ password }, user) => {
         if (!user) {
-            logger.warn("2FA disable failed: not authenticated");
             return { error: "not auth" };
         }
 
         const authenticated = await storage.authenticate(user, password);
         if (!authenticated) {
-            logger.warn("2FA disable failed: invalid password", { user });
             return { error: "invalid password" };
         }
 
         await storage.enableTwoFactor(user, false);
         await storage.setTwoFactorSecret(user, null);
         
-        logger.info("2FA disabled successfully", { user });
         return { success: true };
     },
 
     get2FAStatus: async (data, user) => {
         if (!user) {
-            logger.warn("2FA status check failed: not authenticated");
             return { error: "not auth" };
         }
 
@@ -378,320 +372,320 @@ const actionHandlers = {
 
     createChannel: async ({ name, customId }, user) => {
         if (!user || !name || typeof name !== "string" || name.trim().length < 2) {
-            logger.warn("Channel creation failed: invalid name", { username: user, channelName: name });
             return { error: "invalid channel name" };
         }
 
         const channelId = await storage.createChannel(name.trim(), user, customId);
         if (!channelId) {
-            logger.warn("Channel creation failed: already exists", { username: user, channelName: name });
             return { error: "channel exists" };
         }
 
-        logger.info("Channel created successfully", { username: user, channelName: name, channelId });
+        if (config.redis?.enabled) {
+            redisService.invalidateUserChannels(user).catch(err => {});
+        }
+
         return { success: true, channelId, channel: name.trim() };
     },
 
     getChannels: async (data, user) => {
         if (!user) {
-            logger.warn("Get channels failed: not authenticated");
             return { error: "not auth" };
         }
 
+        if (config.redis?.enabled) {
+            try {
+                const cached = await redisService.getCachedUserChannels(user);
+                if (cached) {
+                    return { success: true, channels: cached };
+                }
+            } catch (error) {}
+        }
+
         const channels = await storage.getChannels(user);
-        logger.info("Channels retrieved", { username: user, count: channels.length });
+        
+        if (config.redis?.enabled) {
+            redisService.cacheUserChannels(user, channels, 600).catch(err => {});
+        }
+
         return { success: true, channels };
     },
 
     searchChannels: async ({ query }, user) => {
         if (!user) {
-            logger.warn("Search channels failed: not authenticated");
             return { error: "not auth" };
         }
 
         if (query === undefined || query === null) {
-            logger.warn("Search channels failed: invalid query", { username: user, query });
             return { error: "invalid query" };
         }
 
         const channels = await storage.searchChannels(query);
-        logger.info("Channels search completed", { username: user, query, count: channels.length });
         return { success: true, channels };
     },
 
     joinChannel: async ({ channel }, user) => {
         if (!user || !channel || typeof channel !== "string") {
-            logger.warn("Channel join failed: invalid channel", { username: user, channel });
             return { error: "invalid channel" };
         }
 
         const result = await storage.joinChannel(channel, user);
         if (!result) {
-            logger.warn("Channel join failed: invalid channel", { username: user, channel });
             return { error: "invalid channel" };
         }
 
-        logger.info("User joined channel", { username: user, channel });
+        if (config.redis?.enabled) {
+            redisService.invalidateUserChannels(user).catch(err => {});
+        }
+
         return { success: true };
     },
 
     leaveChannel: async ({ channel }, user) => {
         if (!user || !channel || typeof channel !== "string") {
-            logger.warn("Channel leave failed: invalid channel", { username: user, channel });
             return { error: "invalid channel" };
         }
 
         const result = await storage.leaveChannel(channel, user);
         if (!result) {
-            logger.warn("Channel leave failed: not a member", { username: user, channel });
             return { error: "not a member" };
         }
 
-        logger.info("User left channel", { username: user, channel });
+        if (config.redis?.enabled) {
+            redisService.invalidateUserChannels(user).catch(err => {});
+        }
+
         return { success: true };
     },
 
     getChannelMembers: async ({ channel }, user) => {
         if (!user || !channel || typeof channel !== "string") {
-            logger.warn("Channel members fetch failed: invalid channel", { username: user, channel });
             return { error: "invalid channel" };
         }
 
         if (!await storage.isChannelMember(channel, user)) {
-            logger.warn("Get channel members failed: not a member", { user, channel });
             return { error: "not a channel member" };
         }
 
         const members = await storage.getChannelMembers(channel);
-        logger.info("Channel members retrieved", { username: user, channel, count: members.length });
         return { success: true, members };
     },
 
     updateChannel: async ({ name, newName }, user) => {
         if (!user) {
-            logger.warn("Update channel failed: not authenticated");
             return { error: "not auth" };
         }
 
         if (!name || !newName || typeof newName !== "string" || newName.trim().length < 2) {
-            logger.warn("Update channel failed: invalid parameters", { user, name, newName });
             return { error: "invalid parameters" };
         }
 
         const isMember = await storage.isChannelMember(name, user);
         if (!isMember) {
-            logger.warn("Update channel failed: not a member", { user, name });
             return { error: "not a member" };
         }
 
         const updated = await storage.updateChannelName(name.trim(), newName.trim(), user);
         if (!updated) {
-            logger.warn("Update channel failed: could not update", { user, name, newName });
             return { error: "update failed" };
         }
 
-        logger.info("Channel name updated successfully", { user, oldName: name, newName });
+        if (config.redis?.enabled) {
+            redisService.invalidateChannel(name).catch(err => {});
+            redisService.invalidateChannel(newName).catch(err => {});
+        }
+
         return { success: true, oldName: name, newName };
     },
 
     getMessages: async ({ channel, limit = 50, before }, user) => {
-    if (!user || !channel || typeof channel !== "string") {
-        logger.warn("Messages fetch failed: invalid parameters", { username: user, channel });
-        return { error: "invalid parameters" };
-    }
+        if (!user || !channel || typeof channel !== "string") {
+            return { error: "invalid parameters" };
+        }
 
-    if (!await storage.isChannelMember(channel, user)) {
-        logger.warn("Get messages failed: not channel member", { user, channel });
-        return { error: "not a channel member" };
-    }
+        if (!await storage.isChannelMember(channel, user)) {
+            return { error: "not a channel member" };
+        }
 
-    const messages = await storage.getMessages(channel, Math.min(limit, 100), before);
-    
-    for (let message of messages) {
-        if (message.voice && message.voice.filename) {
-            message.voice.duration = await storage.getVoiceMessageDuration(message.voice.filename) || 0;
+        if (config.redis?.enabled) {
+            try {
+                const cached = await redisService.getCachedMessages(channel);
+                if (cached) {
+                    return { success: true, messages: cached };
+                }
+            } catch (error) {}
+        }
+
+        const messages = await storage.getMessages(channel, Math.min(limit, 100), before);
+        
+        for (let message of messages) {
+            if (message.voice && message.voice.filename) {
+                message.voice.duration = await storage.getVoiceMessageDuration(message.voice.filename) || 0;
+            }
+            
+            if (message.replyTo && !message.replyToMessage) {
+                const parentMessage = await storage.getMessageById(message.replyTo);
+                if (parentMessage) {
+                    message.replyToMessage = {
+                        id: parentMessage.id,
+                        from: parentMessage.from,
+                        text: parentMessage.text?.substring(0, 100) + (parentMessage.text?.length > 100 ? '...' : ''),
+                        ts: parentMessage.ts,
+                        hasFile: !!parentMessage.file,
+                        hasVoice: !!parentMessage.voice
+                    };
+                }
+            }
         }
         
-        if (message.replyTo && !message.replyToMessage) {
-            const parentMessage = await storage.getMessageById(message.replyTo);
-            if (parentMessage) {
-                message.replyToMessage = {
-                    id: parentMessage.id,
-                    from: parentMessage.from,
-                    text: parentMessage.text?.substring(0, 100) + (parentMessage.text?.length > 100 ? '...' : ''),
-                    ts: parentMessage.ts,
-                    hasFile: !!parentMessage.file,
-                    hasVoice: !!parentMessage.voice
+        if (config.redis?.enabled) {
+            redisService.cacheMessages(channel, messages, 60).catch(err => {});
+        }
+
+        return { success: true, messages };
+    },
+
+    getMessage: async ({ messageId }, user) => {
+        if (!user || !messageId) {
+            return { error: "invalid parameters" };
+        }
+
+        const message = await storage.getMessageById(messageId);
+        if (!message) {
+            return { error: "message not found" };
+        }
+
+        if (!await storage.isChannelMember(message.channel, user)) {
+            return { error: "not a channel member" };
+        }
+
+        return { success: true, message };
+    },
+
+    sendMessage: async ({ channel, text, replyTo, fileId, voiceMessage, encrypt = false }, user) => {
+        if (!user || !channel) {
+            return { error: "bad input" };
+        }
+
+        if (!text && !fileId && !voiceMessage) {
+            return { error: "no content" };
+        }
+
+        if (!await storage.isChannelMember(channel, user)) {
+            return { error: "not a channel member" };
+        }
+
+        let replyToMessage = null;
+        if (replyTo) {
+            replyToMessage = await storage.getMessageById(replyTo);
+            if (!replyToMessage) {
+                return { error: "reply message not found" };
+            }
+            if (replyToMessage.channel !== channel) {
+                return { error: "reply message from different channel" };
+            }
+        }
+
+        let processedText = text ? text.trim().slice(0, config.security.maxMessageLength || 1000) : "";
+        let isEncrypted = false;
+
+        if (encrypt && config.security.encryptionKey && processedText) {
+            try {
+                const encoder = new TextEncoder();
+                const inputBytes = encoder.encode(processedText);
+                const encryptedBytes = anse2_encrypt_wasm(inputBytes, config.security.encryptionKey);
+                processedText = Buffer.from(encryptedBytes).toString('base64');
+                isEncrypted = true;
+            } catch (error) {
+                return { error: "encryption failed" };
+            }
+        }
+
+        let fileAttachment = null;
+        if (fileId) {
+            const fileInfo = await storage.getFileInfo(fileId);
+            if (fileInfo) {
+                fileAttachment = {
+                    filename: fileInfo.filename,
+                    originalName: fileInfo.originalName,
+                    mimetype: fileInfo.mimetype,
+                    size: fileInfo.size,
+                    downloadUrl: `/api/download/${fileInfo.filename}`
                 };
             }
         }
-    }
-    
-    logger.info("Messages retrieved", { username: user, channel, count: messages.length });
-    return { success: true, messages };
-    },
 
-   getMessage: async ({ messageId }, user) => {
-    if (!user || !messageId) {
-        logger.warn("Get message failed: invalid parameters", { username: user, messageId });
-        return { error: "invalid parameters" };
-    }
-
-    const message = await storage.getMessageById(messageId);
-    if (!message) {
-        logger.warn("Message not found", { username: user, messageId });
-        return { error: "message not found" };
-    }
-
-    if (!await storage.isChannelMember(message.channel, user)) {
-        logger.warn("Get message failed: not channel member", { user, channel: message.channel });
-        return { error: "not a channel member" };
-    }
-
-    logger.info("Message retrieved", { username: user, messageId });
-    return { success: true, message };
-   },
-
-   sendMessage: async ({ channel, text, replyTo, fileId, voiceMessage, encrypt = false }, user) => {
-    if (!user || !channel) {
-        logger.warn("Message send failed: invalid parameters", { username: user, channel });
-        return { error: "bad input" };
-    }
-
-    if (!text && !fileId && !voiceMessage) {
-        logger.warn("Message send failed: no content", { username: user, channel });
-        return { error: "no content" };
-    }
-
-    if (!await storage.isChannelMember(channel, user)) {
-        logger.warn("Send message failed: not channel member", { user, channel });
-        return { error: "not a channel member" };
-    }
-
-    let replyToMessage = null;
-    if (replyTo) {
-        replyToMessage = await storage.getMessageById(replyTo);
-        if (!replyToMessage) {
-            logger.warn("Reply to message not found", { replyTo, user, channel });
-            return { error: "reply message not found" };
-        }
-        if (replyToMessage.channel !== channel) {
-            logger.warn("Reply to message from different channel", { replyTo, user, channel });
-            return { error: "reply message from different channel" };
-        }
-    }
-
-    let processedText = text ? text.trim().slice(0, config.security.maxMessageLength || 1000) : "";
-    let isEncrypted = false;
-
-    if (encrypt && config.security.encryptionKey && processedText) {
-        try {
-            const encoder = new TextEncoder();
-            const inputBytes = encoder.encode(processedText);
-            const encryptedBytes = anse2_encrypt_wasm(inputBytes, config.security.encryptionKey);
-            processedText = Buffer.from(encryptedBytes).toString('base64');
-            isEncrypted = true;
-        } catch (error) {
-            logger.error("Message encryption failed", { user, channel, error: error.message });
-            return { error: "encryption failed" };
-        }
-    }
-
-    let fileAttachment = null;
-    if (fileId) {
-        const fileInfo = await storage.getFileInfo(fileId);
-        if (fileInfo) {
-            fileAttachment = {
-                filename: fileInfo.filename,
-                originalName: fileInfo.originalName,
-                mimetype: fileInfo.mimetype,
-                size: fileInfo.size,
-                downloadUrl: `/api/download/${fileInfo.filename}`
+        let voiceAttachment = null;
+        if (voiceMessage) {
+            const duration = await storage.getVoiceMessageDuration(voiceMessage) || 0;
+            voiceAttachment = {
+                filename: voiceMessage,
+                duration: duration,
+                downloadUrl: `/api/download/${voiceMessage}`
             };
         }
-    }
 
-    let voiceAttachment = null;
-    if (voiceMessage) {
-        const duration = await storage.getVoiceMessageDuration(voiceMessage) || 0;
-        voiceAttachment = {
-            filename: voiceMessage,
-            duration: duration,
-            downloadUrl: `/api/download/${voiceMessage}`
+        const msg = {
+            from: user,
+            channel: channel,
+            text: processedText,
+            ts: Date.now(),
+            replyTo: replyTo || null,
+            replyToMessage: replyToMessage ? {
+                id: replyToMessage.id,
+                from: replyToMessage.from,
+                text: replyToMessage.text,
+                ts: replyToMessage.ts,
+                hasFile: !!replyToMessage.file,
+                hasVoice: !!replyToMessage.voice
+            } : null,
+            file: fileAttachment,
+            voice: voiceAttachment,
+            encrypted: isEncrypted
         };
-    }
 
-    const msg = {
-        from: user,
-        channel: channel,
-        text: processedText,
-        ts: Date.now(),
-        replyTo: replyTo || null,
-        replyToMessage: replyToMessage ? {
-            id: replyToMessage.id,
-            from: replyToMessage.from,
-            text: replyToMessage.text,
-            ts: replyToMessage.ts,
-            hasFile: !!replyToMessage.file,
-            hasVoice: !!replyToMessage.voice
-        } : null,
-        file: fileAttachment,
-        voice: voiceAttachment,
-        encrypted: isEncrypted
-    };
-
-    const saved = await storage.saveMessage(msg);
-    
-    if (isEncrypted && config.security.encryptionKey) {
-        try {
-            const encryptedBytes = Buffer.from(saved.text, 'base64');
-            const decryptedBytes = anse2_decrypt_wasm(encryptedBytes, config.security.encryptionKey);
-            const decoder = new TextDecoder();
-            saved.text = decoder.decode(decryptedBytes);
-            saved.encrypted = false;
-        } catch (error) {
-            logger.warn("Failed to decrypt saved message for broadcast", { messageId: saved.id, error: error.message });
-            saved.text = "[encrypted message]";
+        const saved = await storage.saveMessage(msg);
+        
+        if (isEncrypted && config.security.encryptionKey) {
+            try {
+                const encryptedBytes = Buffer.from(saved.text, 'base64');
+                const decryptedBytes = anse2_decrypt_wasm(encryptedBytes, config.security.encryptionKey);
+                const decoder = new TextDecoder();
+                saved.text = decoder.decode(decryptedBytes);
+                saved.encrypted = false;
+            } catch (error) {
+                saved.text = "[encrypted message]";
+            }
         }
-    }
-    
-    const messageToSend = {
-        ...saved,
-        type: "message",
-        action: "new"
-    };
+        
+        const messageToSend = {
+            ...saved,
+            type: "message",
+            action: "new"
+        };
 
-    wsClients.forEach(client => {
-        if (client.readyState === 1) {
-            client.send(JSON.stringify(messageToSend));
+        wsClients.forEach(client => {
+            if (client.readyState === 1) {
+                client.send(JSON.stringify(messageToSend));
+            }
+        });
+
+        sseClients.forEach(client => {
+            client.res.write(`data: ${JSON.stringify(messageToSend)}\n\n`);
+        });
+
+        if (config.redis?.enabled) {
+            redisService.invalidateChannel(channel).catch(err => {});
         }
-    });
 
-    sseClients.forEach(client => {
-        client.res.write(`data: ${JSON.stringify(messageToSend)}\n\n`);
-    });
-
-    logger.info("Message sent", { 
-        username: user, 
-        channel, 
-        messageId: saved.id, 
-        hasFile: !!fileId, 
-        hasVoice: !!voiceMessage, 
-        hasText: !!text, 
-        encrypted: isEncrypted,
-        isReply: !!replyTo 
-    });
-    return { success: true, message: saved };
+        return { success: true, message: saved };
     },
 
     sendVoiceOnly: async ({ channel, voiceMessage }, user) => {
         if (!user || !channel || !voiceMessage) {
-            logger.warn("Voice only send failed: invalid parameters", { username: user, channel, voiceMessage });
             return { error: "bad input" };
         }
 
         if (!await storage.isChannelMember(channel, user)) {
-            logger.warn("Send voice failed: not channel member", { user, channel });
             return { error: "not a channel member" };
         }
 
@@ -732,30 +726,29 @@ const actionHandlers = {
             client.res.write(`data: ${JSON.stringify(messageToSend)}\n\n`);
         });
 
-        logger.info("Voice message sent", { username: user, channel, messageId: saved.id, voiceMessage, duration });
+        if (config.redis?.enabled) {
+            redisService.invalidateChannel(channel).catch(err => {});
+        }
+
         return { success: true, message: saved };
     },
 
     getUsers: async (data, user) => {
         if (!user) {
-            logger.warn("Get users failed: not authenticated");
             return { error: "not auth" };
         }
 
         const users = await storage.getUsers();
-        logger.info("Users list retrieved", { username: user, count: users.length });
         return { success: true, users };
     },
 
     uploadAvatar: async (req, user) => {
         if (!req.file) {
-            logger.warn("Avatar upload failed: no file", { username: user });
             return { error: "no file" };
         }
 
         const result = await storage.updateUserAvatar(user, req.file.filename);
         if (!result) {
-            logger.warn("Avatar upload failed: user not found", { username: user });
             return { error: "user not found" };
         }
 
@@ -766,7 +759,6 @@ const actionHandlers = {
         else if (extension === '.webp') mimeType = 'image/webp';
         else if (extension === '.jpg') mimeType = 'image/jpeg';
 
-        logger.info("Avatar uploaded successfully", { username: user, filename: req.file.filename });
         return { 
             success: true, 
             filename: req.file.filename,
@@ -777,7 +769,6 @@ const actionHandlers = {
 
     uploadFile: async (req, user) => {
         if (!req.file) {
-            logger.warn("File upload failed: no file", { username: user });
             return { error: "no file" };
         }
 
@@ -793,14 +784,6 @@ const actionHandlers = {
         };
 
         await storage.saveFileInfo(fileInfo);
-
-        logger.info("File uploaded successfully", { 
-            username: user, 
-            fileId,
-            filename: req.file.filename,
-            originalName: req.file.originalname,
-            size: req.file.size
-        });
         
         return { 
             success: true, 
@@ -819,7 +802,6 @@ const actionHandlers = {
 
     webrtcOffer: async ({ toUser, offer, channel }, user) => {
         if (!user || !toUser || !offer) {
-            logger.warn("WebRTC offer failed: missing data", { user, toUser });
             return { error: "missing offer data" };
         }
 
@@ -835,13 +817,11 @@ const actionHandlers = {
         [...wsClients].filter(ws => ws.user === toUser && ws.readyState === 1)
             .forEach(ws => { try { ws.send(offerData); } catch {} });
 
-        logger.info("WebRTC offer sent", { from: user, to: toUser, channel });
         return { success: true };
     },
 
     webrtcAnswer: async ({ toUser, answer }, user) => {
         if (!user || !toUser || !answer) {
-            logger.warn("WebRTC answer failed: missing data", { user, toUser });
             return { error: "missing answer data" };
         }
 
@@ -856,13 +836,11 @@ const actionHandlers = {
         [...wsClients].filter(ws => ws.user === toUser && ws.readyState === 1)
             .forEach(ws => { try { ws.send(answerData); } catch {} });
 
-        logger.info("WebRTC answer sent", { from: user, to: toUser });
         return { success: true };
     },
 
     iceCandidate: async ({ toUser, candidate }, user) => {
         if (!user || !toUser || !candidate) {
-            logger.warn("ICE candidate failed: missing data", { user, toUser });
             return { error: "missing candidate data" };
         }
 
@@ -877,54 +855,44 @@ const actionHandlers = {
         [...wsClients].filter(ws => ws.user === toUser && ws.readyState === 1)
             .forEach(ws => { try { ws.send(candidateData); } catch {} });
 
-        logger.info("ICE candidate sent", { from: user, to: toUser });
         return { success: true };
     },
 
     getWebRTCOffer: async ({ fromUser }, user) => {
         if (!user || !fromUser) {
-            logger.warn("WebRTC get offer failed: missing fromUser", { user, fromUser });
             return { error: "missing fromUser" };
         }
 
         const offer = await storage.getWebRTCOffer(fromUser, user);
         if (offer) {
-            logger.info("WebRTC offer retrieved", { from: fromUser, to: user });
             return { success: true, offer: offer.offer, channel: offer.channel };
         }
-        logger.info("No WebRTC offer found", { from: fromUser, to: user });
         return { success: false };
     },
 
     getWebRTCAnswer: async ({ fromUser }, user) => {
         if (!user || !fromUser) {
-            logger.warn("WebRTC get answer failed: missing fromUser", { user, fromUser });
             return { error: "missing fromUser" };
         }
 
         const answer = await storage.getWebRTCAnswer(fromUser, user);
         if (answer) {
-            logger.info("WebRTC answer retrieved", { from: fromUser, to: user });
             return { success: true, answer: answer.answer };
         }
-        logger.info("No WebRTC answer found", { from: fromUser, to: user });
         return { success: false };
     },
 
     getICECandidates: async ({ fromUser }, user) => {
         if (!user || !fromUser) {
-            logger.warn("WebRTC get ICE candidates failed: missing fromUser", { user, fromUser });
             return { error: "missing fromUser" };
         }
 
         const candidates = await storage.getICECandidates(fromUser, user);
-        logger.info("ICE candidates retrieved", { from: fromUser, to: user, count: candidates.length });
         return { success: true, candidates };
     },
 
     webrtcEndCall: async ({ targetUser }, user) => {
         if (!user || !targetUser) {
-            logger.warn("WebRTC end call failed: missing targetUser", { user, targetUser });
             return { error: "missing targetUser" };
         }
 
@@ -933,13 +901,11 @@ const actionHandlers = {
         [...wsClients].filter(ws => ws.user === targetUser && ws.readyState === 1)
             .forEach(ws => { try { ws.send(endCallData); } catch {} });
 
-        logger.info("WebRTC call ended", { from: user, to: targetUser });
         return { success: true };
     },
 
     uploadVoiceMessage: async ({ channel, duration }, user) => {
         if (!user || !channel) {
-            logger.warn("Voice message upload failed: missing parameters", { user, channel });
             return { error: "missing parameters" };
         }
 
@@ -947,27 +913,90 @@ const actionHandlers = {
         
         await storage.saveVoiceMessageInfo(voiceId, user, channel, duration);
         
-        logger.info("Voice message upload initiated", { user, channel, voiceId, duration });
         return { success: true, voiceId, uploadUrl: `/api/upload/voice/${voiceId}` };
+    },
+
+    verifyEmail: async ({ email, code }, user) => {
+        if (!user || !email || !code) {
+            return { error: "missing parameters" };
+        }
+
+        const verified = await storage.verifyEmailCode(user, email, code);
+        if (!verified) {
+            return { error: "invalid code or email" };
+        }
+
+        await storage.setUserEmail(user, email);
+        return { success: true };
+    },
+
+    requestPasswordReset: async ({ email }) => {
+        if (!email) {
+            return { error: "email required" };
+        }
+
+        const user = await storage.getUserByEmail(email);
+        if (!user) {
+            return { success: true, message: "If email exists, reset instructions sent" };
+        }
+
+        const resetToken = crypto.randomBytes(32).toString('hex');
+        await storage.createPasswordReset(user, resetToken);
+
+        await emailService.sendPasswordResetEmail(email, resetToken);
+
+        return { success: true, message: "If email exists, reset instructions sent" };
+    },
+
+    resetPassword: async ({ token, newPassword }) => {
+        if (!token || !newPassword) {
+            return { error: "missing parameters" };
+        }
+
+        const result = await storage.usePasswordReset(token, newPassword);
+        if (!result) {
+            return { error: "invalid or expired token" };
+        }
+
+        return { success: true };
+    },
+
+    sendVerificationEmail: async ({ email }, user) => {
+        if (!user || !email) {
+            return { error: "missing parameters" };
+        }
+
+        const existingUser = await storage.getUserByEmail(email);
+        if (existingUser && existingUser !== user) {
+            return { error: "email already in use" };
+        }
+
+        const verificationCode = Math.random().toString().substring(2, 8);
+        await storage.createEmailVerification(user, email, verificationCode);
+
+        const sent = await emailService.sendVerificationEmail(email, verificationCode);
+        
+        if (!sent) {
+            return { error: "failed to send email" };
+        }
+
+        return { success: true };
     },
 
     getUpdates: async (data, user) => {
         if (!user) {
-            logger.warn("Update check failed: not authenticated");
             return { error: "not auth" };
         }
 
         const updateInfo = await checkNPMUpdates();
         
         if (updateInfo) {
-            logger.info("Update check completed", { user, hasUpdates: true });
             return { 
                 success: true, 
                 hasUpdates: true, 
                 updateInfo 
             };
         } else {
-            logger.info("Update check completed", { user, hasUpdates: false });
             return { 
                 success: true, 
                 hasUpdates: false 
@@ -978,28 +1007,11 @@ const actionHandlers = {
 
 const createEndpoint = (method, path, middleware, action, paramMap = null) => {
     app[method](path, middleware, async (req, res) => {
-        const startTime = Date.now();
         try {
             const params = paramMap ? paramMap(req) : req.method === 'GET' ? req.query : req.body;
             const result = await actionHandlers[action](params, req.user);
-            logger.info("Endpoint request processed", {
-                method,
-                path,
-                action,
-                user: req.user,
-                success: result.success,
-                duration: Date.now() - startTime
-            });
             res.json(result.success ? result : { success: false, ...result });
         } catch (e) {
-            logger.error("Endpoint error", {
-                method,
-                path,
-                action,
-                error: e.message,
-                stack: e.stack,
-                ip: req.ip
-            });
             res.status(500).json({ success: false, error: "server error" });
         }
     });
@@ -1015,10 +1027,10 @@ createEndpoint('get', '/api/2fa/status', require2FAMiddleware, 'get2FAStatus');
 createEndpoint('get', '/api/updates/check', require2FAMiddleware, 'getUpdates');
 createEndpoint('post', '/api/message', channelAuthMiddleware, 'sendMessage');
 createEndpoint('post', '/api/message/voice-only', channelAuthMiddleware, 'sendVoiceOnly');
-createEndpoint('get', '/api/messages', channelAuthMiddleware, 'getMessages', req => req.query);
+createEndpoint('get', '/api/messages', [channelAuthMiddleware, cacheMiddleware(60)], 'getMessages', req => req.query);
 createEndpoint('get', '/api/message/:messageId', channelAuthMiddleware, 'getMessage');
 createEndpoint('post', '/api/channels/create', require2FAMiddleware, 'createChannel');
-createEndpoint('get', '/api/channels', require2FAMiddleware, 'getChannels');
+createEndpoint('get', '/api/channels', [require2FAMiddleware, cacheMiddleware(600)], 'getChannels');
 createEndpoint('patch', '/api/channels', require2FAMiddleware, 'updateChannel', req => ({
     name: req.query.name,
     newName: req.body.newName
@@ -1028,7 +1040,7 @@ createEndpoint('post', '/api/channels/join-by-id', require2FAMiddleware, 'joinCh
 createEndpoint('post', '/api/channels/leave', require2FAMiddleware, 'leaveChannel');
 createEndpoint('get', '/api/channels/members', channelAuthMiddleware, 'getChannelMembers', req => req.query);
 createEndpoint('post', '/api/channels/search', require2FAMiddleware, 'searchChannels');
-createEndpoint('get', '/api/users', require2FAMiddleware, 'getUsers');
+createEndpoint('get', '/api/users', [require2FAMiddleware, cacheMiddleware(300)], 'getUsers');
 createEndpoint('post', '/api/webrtc/offer', require2FAMiddleware, 'webrtcOffer');
 createEndpoint('post', '/api/webrtc/answer', require2FAMiddleware, 'webrtcAnswer');
 createEndpoint('post', '/api/webrtc/ice-candidate', require2FAMiddleware, 'iceCandidate');
@@ -1037,9 +1049,22 @@ createEndpoint('get', '/api/webrtc/answer', require2FAMiddleware, 'getWebRTCAnsw
 createEndpoint('get', '/api/webrtc/ice-candidates', require2FAMiddleware, 'getICECandidates', req => req.query);
 createEndpoint('post', '/api/webrtc/end-call', require2FAMiddleware, 'webrtcEndCall');
 createEndpoint('post', '/api/voice/upload', require2FAMiddleware, 'uploadVoiceMessage');
+createEndpoint('post', '/api/email/verify', require2FAMiddleware, 'verifyEmail');
+createEndpoint('post', '/api/email/send-verification', require2FAMiddleware, 'sendVerificationEmail');
+createEndpoint('post', '/api/auth/reset-password', limiter(), 'requestPasswordReset');
+createEndpoint('post', '/api/auth/reset-password/confirm', limiter(), 'resetPassword');
 
 app.get("/api/ping", (req, res) => {
     res.json({ success: true, message: "pong" });
+});
+
+app.get("/api/admin/redis-stats", require2FAMiddleware, async (req, res) => {
+    try {
+        const stats = await redisService.getStats();
+        res.json({ success: true, stats });
+    } catch (error) {
+        res.status(500).json({ success: false, error: "Failed to get Redis stats" });
+    }
 });
 
 app.post("/api/upload/avatar", require2FAMiddleware, avatarUpload.single("avatar"), async (req, res) => {
@@ -1047,7 +1072,6 @@ app.post("/api/upload/avatar", require2FAMiddleware, avatarUpload.single("avatar
         const result = await actionHandlers.uploadAvatar(req, req.user);
         res.json(result);
     } catch (error) {
-        logger.error("Avatar upload error", { error: error.message, user: req.user });
         res.status(500).json({ success: false, error: "upload failed" });
     }
 });
@@ -1057,7 +1081,6 @@ app.post("/api/upload/file", require2FAMiddleware, fileUpload.single("file"), as
         const result = await actionHandlers.uploadFile(req, req.user);
         res.json(result);
     } catch (error) {
-        logger.error("File upload error", { error: error.message, user: req.user });
         res.status(500).json({ success: false, error: "upload failed" });
     }
 });
@@ -1068,19 +1091,15 @@ app.get("/api/user/:username/avatar", async (req, res) => {
         const user = users.find(u => u.username === req.params.username);
 
         if (!user?.avatar) {
-            logger.warn("Avatar not found", { username: req.params.username });
             return res.status(404).json({ error: "avatar not found" });
         }
 
         if (!fs.existsSync(path.join(config.uploads.dir, user.avatar))) {
-            logger.warn("Avatar file not found", { username: req.params.username, avatar: user.avatar });
             return res.status(404).json({ error: "avatar file not found" });
         }
 
-        logger.info("Avatar served", { username: req.params.username });
         res.sendFile(user.avatar, { root: config.uploads.dir });
     } catch (error) {
-        logger.error("Avatar serve error", { error: error.message, username: req.params.username });
         res.status(500).json({ success: false, error: "server error" });
     }
 });
@@ -1095,20 +1114,9 @@ app.post("/api/upload/voice/:voiceId", require2FAMiddleware, multer().single('vo
 
         const filePath = path.join(config.uploads.dir, voiceId);
         await fs.promises.writeFile(filePath, req.file.buffer);
-
-        logger.info("Voice message uploaded", { 
-            user: req.user, 
-            voiceId, 
-            size: req.file.size 
-        });
         
         res.json({ success: true, voiceId });
     } catch (error) {
-        logger.error("Voice message upload failed", { 
-            user: req.user, 
-            voiceId: req.params.voiceId, 
-            error: error.message 
-        });
         res.status(500).json({ success: false, error: "upload failed" });
     }
 });
@@ -1118,24 +1126,15 @@ app.get("/api/download/:filename", (req, res) => {
     const filePath = path.join(config.uploads.dir, filename);
 
     if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
-        logger.warn("Invalid filename attempted", { filename, ip: req.ip });
         return res.status(400).json({ error: "invalid filename" });
     }
 
     if (fs.existsSync(filePath)) {
         const originalName = storage.getOriginalFileName(filename);
-        logger.info("File download started", { filename, originalName, ip: req.ip, size: fs.statSync(filePath).size });
         
         res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(originalName)}"`);
-        res.download(filePath, originalName, (err) => {
-            if (err) {
-                logger.error("File download error", { filename, error: err.message, ip: req.ip });
-            } else {
-                logger.info("File download completed", { filename, originalName, ip: req.ip });
-            }
-        });
+        res.download(filePath, originalName);
     } else {
-        logger.warn("File not found for download", { filename, ip: req.ip });
         res.status(404).json({ success: false, error: "file not found" });
     }
 });
@@ -1150,11 +1149,8 @@ app.get("/api/events", authMiddleware, async (req, res) => {
     const client = { res, user: req.user, id: crypto.randomBytes(8).toString("hex") };
     sseClients.add(client);
 
-    logger.info("SSE client connected", { username: req.user, clientId: client.id });
-
     req.on("close", () => {
         sseClients.delete(client);
-        logger.info("SSE client disconnected", { username: req.user, clientId: client.id });
     });
 
     res.write(`data: ${JSON.stringify({ type: "connected", clientId: client.id })}\n\n`);
@@ -1166,12 +1162,9 @@ wss.on("connection", (ws, req) => {
     wsClients.add(ws);
     ws.isAlive = true;
 
-    logger.info("WebSocket connection established", { user: ws.user });
-
     ws.on("pong", () => { ws.isAlive = true; });
     ws.on("close", () => {
         wsClients.delete(ws);
-        logger.info("WebSocket connection closed", { user: ws.user });
     });
 
     ws.on("message", async data => {
@@ -1179,25 +1172,13 @@ wss.on("connection", (ws, req) => {
             const payload = JSON.parse(data.toString());
             const result = await actionHandlers[payload.action]?.(payload, ws.user);
             if (result) ws.send(JSON.stringify(result));
-            logger.info("WebSocket message processed", { user: ws.user, action: payload.action });
-        } catch (e) {
-            logger.error("WebSocket error", { user: ws.user, error: e.message });
-        }
+        } catch (e) {}
     });
 });
 
 const server = app.listen(config.server.port, config.server.host, () => {
     const address = server.address();
-    logger.info("Server started", { 
-        host: address.address, 
-        port: address.port,
-        features: {
-            uploads: config.features.uploads,
-            voiceMessages: config.features.voiceMessages,
-            webRTC: config.features.webRTC,
-            twoFactor: config.features.twoFactor
-        }
-    });
+    console.log(`Server started on ${address.address}:${address.port}`);
 });
 
 server.on("upgrade", (req, socket, head) => {
@@ -1212,25 +1193,21 @@ server.on("upgrade", (req, socket, head) => {
 
     if (!token) {
         socket.destroy();
-        logger.warn("WebSocket upgrade failed: no auth", { ip: req.socket.remoteAddress });
         return;
     }
 
     storage.validateToken(token).then(user => {
         if (!user) {
             socket.destroy();
-            logger.warn("WebSocket upgrade failed: invalid token", { ip: req.socket.remoteAddress });
             return;
         }
 
         wss.handleUpgrade(req, socket, head, ws => {
             ws.user = user;
             wss.emit("connection", ws, req);
-            logger.info("WebSocket upgraded successfully", { user, ip: req.socket.remoteAddress });
         });
     }).catch(err => {
         socket.destroy();
-        logger.error("WebSocket upgrade error", { error: err.message, ip: req.socket.remoteAddress });
     });
 });
 
@@ -1238,7 +1215,6 @@ const interval = setInterval(() => {
     wsClients.forEach(ws => {
         if (!ws.isAlive) {
             ws.terminate();
-            logger.info("WebSocket terminated (no ping)", { user: ws.user });
             return;
         }
         ws.isAlive = false;
@@ -1249,28 +1225,17 @@ const interval = setInterval(() => {
     for (const [username, session] of pending2FASessions.entries()) {
         if (now - session.createdAt > 5 * 60 * 1000) {
             pending2FASessions.delete(username);
-            logger.info("2FA session expired", { username });
         }
     }
 
     if (now % 3600000 < 30000) {
-        storage.cleanupOldVoiceMessages(24 * 60 * 60)
-            .then(deletedCount => {
-                if (deletedCount > 0) {
-                    logger.info("Cleaned up old voice message records", { deletedCount });
-                }
-            })
-            .catch(error => {
-                logger.error("Failed to cleanup voice message records", { error: error.message });
-            });
+        storage.cleanupOldVoiceMessages(24 * 60 * 60).catch(error => {});
     }
 }, 30000);
 
 process.on("SIGTERM", () => {
-    logger.info("SIGTERM received, shutting down gracefully");
     clearInterval(interval);
     server.close(() => {
-        logger.info("Server closed");
         process.exit(0);
     });
 });
