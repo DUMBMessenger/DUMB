@@ -5,6 +5,21 @@ import { execSync } from "child_process";
 import process from "process";
 import inquirer from "inquirer";
 import gradient from "gradient-string";
+import https from "https";
+
+async function checkInternet() {
+    return new Promise((resolve) => {
+        const req = https.get("https://dumb-msg.xyz", (res) => {
+            resolve(res.statusCode === 200);
+        });
+
+        req.on("error", () => resolve(false));
+        req.setTimeout(3000, () => {
+            req.destroy();
+            resolve(false);
+        });
+    });
+}
 
 async function runInstaller() {
   console.log(gradient("cyan", "magenta").multiline([
@@ -70,10 +85,18 @@ async function runInstaller() {
   }
 
   try {
-    console.log("\n📥 Cloning repository from GitHub...");
-    execSync("git clone https://github.com/dumbmessenger/dumb.git temp_repo", { stdio: "inherit" });
-    
-    const templatesPath = "temp_repo/templates";
+    const isOnline = await checkInternet();
+    console.log(isOnline);
+    let templatesPath = "temp_repo/templates";
+
+    if (isOnline) {
+        console.log("\n📥 Cloning repository from GitHub...");
+        execSync("git clone https://github.com/dumbmessenger/dumb.git temp_repo", {stdio: "inherit"});
+    } else {
+        console.log("\n📍 Using local template folder")
+        templatesPath = "templates/";
+    }
+
     if (!fs.existsSync(templatesPath)) {
       console.log("❌ Templates folder not found in repository");
       process.exit(1);

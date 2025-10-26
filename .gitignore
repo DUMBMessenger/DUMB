@@ -1,3 +1,7 @@
 node_modules
 templates/db.json
 templates/uploads
+/temp_repo/
+/bin/temp_repo/
+/bin/dumb-messenger/
+/dumb-messenger/
