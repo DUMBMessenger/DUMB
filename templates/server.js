@@ -1,3 +1,9 @@
+// hook (insert evil emoji)
+import { loadPlugins, applyPlugins } from "./dumix.js";
+await loadPlugins("./plugins");
+await applyPlugins();
+
+// imports
 import express from "express";
 import cors from "cors";
 import multer from "multer";
