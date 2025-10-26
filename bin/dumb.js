@@ -190,6 +190,7 @@ async function runInstaller() {
         cors: "^2.8.5",
         qrcode: "^1.5.4",
         speakeasy: "^2.0.0"
+        
       }
     };
     
