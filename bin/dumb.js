@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import fs from "fs";
 import path from "path";
-import { execSync } from "child_process";
+import { execSync, execFileSync } from "child_process";
 import process from "process";
 import inquirer from "inquirer";
 import gradient from "gradient-string";
@@ -382,7 +382,7 @@ MYSQL_DATABASE=dumbmessenger` : ''}`;
         execSync("rm -rf temp_repo"); 
       }
       if (fs.existsSync(projectPath)) {
-        execSync(`rm -rf ${projectPath}`);
+        execFileSync("rm", ["-rf", projectPath]);
       }
     } catch {}
     process.exit(1);

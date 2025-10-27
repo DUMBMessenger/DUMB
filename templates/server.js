@@ -1210,17 +1210,25 @@ app.post("/api/upload/voice/:voiceId", require2FAMiddleware, multer().single('vo
 
 app.get("/api/download/:filename", (req, res) => {
     const filename = req.params.filename;
-    const filePath = path.join(config.uploads.dir, filename);
-
-    if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
-        return res.status(400).json({ error: "invalid filename" });
+    // Build the absolute path to the file, normalize and resolve symlinks
+    let requestedPath;
+    try {
+        requestedPath = path.resolve(config.uploads.dir, filename);
+        requestedPath = fs.realpathSync(requestedPath);
+    } catch (e) {
+        return res.status(400).json({ error: "invalid filename or path" });
+    }
+    // Ensure the resolved path is under uploads directory
+    const uploadsDir = fs.realpathSync(config.uploads.dir);
+    if (!requestedPath.startsWith(uploadsDir + path.sep)) {
+        return res.status(403).json({ error: "forbidden" });
     }
 
-    if (fs.existsSync(filePath)) {
+    if (fs.existsSync(requestedPath)) {
         const originalName = storage.getOriginalFileName(filename);
         
         res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(originalName)}"`);
-        res.download(filePath, originalName);
+        res.download(requestedPath, originalName);
     } else {
         res.status(404).json({ success: false, error: "file not found" });
     }
