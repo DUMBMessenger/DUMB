@@ -405,8 +405,8 @@ export async function authenticate(username, passwordPlain) {
     const check = pbkdf2(passwordPlain, u.salt);
     return check === u.passwordHash ? u.username : null;
   } else {
-    const check = sha256(passwordPlain);
-    return check === u.passwordHash ? u.username : null;
+    // Insecure password hash detected, refuse login
+    return null;
   }
 }
 
