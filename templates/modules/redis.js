@@ -10,7 +10,6 @@ export class RedisService {
 
   async connect() {
     if (!this.config.enabled) {
-      console.log('Redis disabled, using memory fallback');
       return;
     }
 
@@ -25,23 +24,19 @@ export class RedisService {
       });
 
       this.client.on('error', (err) => {
-        console.error('Redis error:', err);
         this.connected = false;
       });
 
       this.client.on('connect', () => {
-        console.log('Redis connected');
         this.connected = true;
       });
 
       this.client.on('disconnect', () => {
-        console.log('Redis disconnected');
         this.connected = false;
       });
 
       await this.client.connect();
     } catch (error) {
-      console.error('Redis connection failed, falling back to memory:', error);
       this.connected = false;
     }
   }
@@ -63,7 +58,6 @@ export class RedisService {
       }
       return true;
     } catch (error) {
-      console.error('Redis set error, falling back to memory:', error);
       this.memoryCache.set(key, value);
       return false;
     }
@@ -78,7 +72,6 @@ export class RedisService {
       const value = await this.client.get(key);
       return value ? JSON.parse(value) : null;
     } catch (error) {
-      console.error('Redis get error, falling back to memory:', error);
       return this.memoryCache.get(key) || null;
     }
   }
@@ -93,7 +86,6 @@ export class RedisService {
       this.memoryCache.delete(key);
       return true;
     } catch (error) {
-      console.error('Redis del error:', error);
       return this.memoryCache.delete(key);
     }
   }
@@ -106,7 +98,6 @@ export class RedisService {
     try {
       return await this.client.exists(key);
     } catch (error) {
-      console.error('Redis exists error:', error);
       return this.memoryCache.has(key);
     }
   }
@@ -197,7 +188,5 @@ export class RedisService {
       }
       return;
     }
-
-    console.log('Redis cleanup completed');
   }
 }

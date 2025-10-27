@@ -1,9 +1,17 @@
 export class BotSystem {
   constructor(storage, websocketServer) {
     this.storage = storage;
-    this.wss = websocketServer;
+    this._wss = websocketServer;
     this.bots = new Map();
     this.botUsers = new Set();
+  }
+
+  set wss(websocketServer) {
+    this._wss = websocketServer;
+  }
+
+  get wss() {
+    return this._wss;
   }
 
   async registerBot(username, owner, webhookUrl = null) {
@@ -31,12 +39,13 @@ export class BotSystem {
   }
 
   async createBotAccount(username, owner) {
-    const password = require('crypto').randomBytes(32).toString('hex');
+    const crypto = require('crypto');
+    const password = crypto.randomBytes(32).toString('hex');
     
     await this.storage.registerUser(username, password);
     
-    const token = require('crypto').randomBytes(32).toString('hex');
-    await this.storage.saveToken(username, token, Date.now() + 365 * 24 * 60 * 60 * 1000); // 1 год
+    const token = crypto.randomBytes(32).toString('hex');
+    await this.storage.saveToken(username, token, Date.now() + 365 * 24 * 60 * 60 * 1000);
     
     await this.storage.setUserType(username, 'bot');
 
@@ -80,11 +89,13 @@ export class BotSystem {
 
     const saved = await this.storage.saveMessage(msg);
     
-    this.wss.broadcast({
-      ...saved,
-      type: "message",
-      action: "new"
-    });
+    if (this._wss) {
+      this._wss.broadcast({
+        ...saved,
+        type: "message",
+        action: "new"
+      });
+    }
 
     return saved;
   }
@@ -106,6 +117,9 @@ export class BotSystem {
     }
 
     return 'Неизвестная команда. Напишите "help" для списка команд.';
+  }
+
+  sendWebhook(bot, message) {
   }
 
   async deleteBot(username, owner) {

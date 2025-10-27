@@ -63,6 +63,27 @@ async function runInstaller() {
       default: "enable"
     },
     {
+      type: "list",
+      name: "email",
+      message: "Enable email (Mailtrap):",
+      choices: ["enable", "disable"],
+      default: "enable"
+    },
+    {
+      type: "list",
+      name: "redis",
+      message: "Enable Redis caching:",
+      choices: ["enable", "disable"],
+      default: "enable"
+    },
+    {
+      type: "list",
+      name: "proxy",
+      message: "Enable proxy for external requests:",
+      choices: ["enable", "disable"],
+      default: "disable"
+    },
+    {
       type: "input",
       name: "port",
       message: "Server port:",
@@ -105,13 +126,33 @@ async function runInstaller() {
     console.log("📁 Creating project structure...");
     fs.mkdirSync(projectPath, { recursive: true });
     fs.mkdirSync(path.join(projectPath, "storage", "slaves"), { recursive: true });
+    fs.mkdirSync(path.join(projectPath, "modules"), { recursive: true });
 
     console.log("📋 Copying template files...");
     
-    const serverSrc = path.join(templatesPath, "server.js");
-    const serverDest = path.join(projectPath, "server.js");
-    if (fs.existsSync(serverSrc)) {
-      fs.copyFileSync(serverSrc, serverDest);
+    const filesToCopy = [
+      "server.js",
+      "config.js",
+      "dumix.js",
+      "package.json"
+    ];
+
+    filesToCopy.forEach(file => {
+      const src = path.join(templatesPath, file);
+      const dest = path.join(projectPath, file);
+      if (fs.existsSync(src)) {
+        fs.copyFileSync(src, dest);
+      }
+    });
+
+    const modulesSrcDir = path.join(templatesPath, "modules");
+    if (fs.existsSync(modulesSrcDir)) {
+      const moduleFiles = fs.readdirSync(modulesSrcDir);
+      moduleFiles.forEach(file => {
+        const src = path.join(modulesSrcDir, file);
+        const dest = path.join(projectPath, "modules", file);
+        fs.copyFileSync(src, dest);
+      });
     }
 
     const storageSrc = path.join(templatesPath, "storage", "storage.js");
@@ -153,6 +194,58 @@ async function runInstaller() {
     twoFactor: true,
     voiceMessages: true
   },
+  email: {
+    enabled: ${answers.email === "enable"},
+    provider: 'mailtrap',
+    mailtrap: {
+      enabled: ${answers.email === "enable"},
+      apiToken: process.env.MAILTRAP_API_TOKEN || 'd0d5ae5d37acdab32ba0618ed4c0b22b',
+      fromEmail: process.env.SMTP_FROM_EMAIL || 'hello@dumb-msg.xyz',
+      fromName: process.env.SMTP_FROM_NAME || 'Dumb Messenger',
+      appUrl: process.env.APP_URL || 'http://localhost:${answers.port}'
+    },
+    smtp: {
+      enabled: false,
+      host: process.env.SMTP_HOST || 'smtp.gmail.com',
+      port: process.env.SMTP_PORT || 587,
+      secure: true,
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS
+      },
+      fromEmail: process.env.SMTP_FROM_EMAIL || 'noreply@example.com',
+      fromName: process.env.SMTP_FROM_NAME || 'Dumb Messenger',
+      appUrl: process.env.APP_URL || 'http://localhost:${answers.port}'
+    },
+    firebase: {
+      enabled: process.env.FIREBASE_ENABLED === 'false',
+      serviceAccount: process.env.FIREBASE_SERVICE_ACCOUNT
+    }
+  },
+  redis: {
+    enabled: ${answers.redis === "enable"},
+    url: process.env.REDIS_URL || 'redis://localhost:6379',
+    password: process.env.REDIS_PASSWORD,
+    cache: {
+      messagesTtl: 300,
+      usersTtl: 600,
+      channelsTtl: 900
+    }
+  },
+  proxy: {
+    enabled: ${answers.proxy === "enable"},
+    rotationEnabled: false,
+    rotationInterval: 30000,
+    proxies: [
+      {
+        type: 'http',
+        host: 'proxy.example.com',
+        port: 8080,
+        username: process.env.PROXY_USER,
+        password: process.env.PROXY_PASS
+      }
+    ]
+  },
   security: {
     passwordMinLength: 8,
     tokenTTL: 24 * 60 * 60 * 1000,
@@ -169,11 +262,13 @@ async function runInstaller() {
     type: "${answers.dbType}",
     file: "${answers.dbType === 'mysql' ? 'dumb_messenger' : 'db.json'}",
     ${answers.dbType === 'mysql' ? `
-    host: "localhost",
-    port: 3306,
-    user: "root",
-    password: "",
-    database: "dumb_messenger"` : ''}
+    mysql: {
+      host: process.env.MYSQL_HOST || "localhost",
+      port: process.env.MYSQL_PORT || 3306,
+      user: process.env.MYSQL_USER || "root",
+      password: process.env.MYSQL_PASSWORD || "",
+      database: process.env.MYSQL_DATABASE || "dumbmessenger"
+    }` : ''}
   },
   uploads: {
     dir: "uploads",
@@ -201,19 +296,29 @@ async function runInstaller() {
       type: "module",
       scripts: {
         start: "node server.js",
-        dev: "node --watch server.js"
+        dev: "node --watch server.js",
+        plugins: "node -e \"import('./dumix.js').then(m => m.loadPlugins())\""
       },
       dependencies: {
         "@akaruineko1/anse2": "^0.1.0",
-        express: "^4.18.2",
-        ws: "^8.17.0",
-        "sql.js": "^1.8.0",
+        "axios": "^1.12.2",
+        "cors": "^2.8.5",
+        "express": "^4.18.2",
+        "form-data": "^4.0.4",
+        "geoip-lite": "^1.4.10",
+        "https-proxy-agent": "^7.0.6",
+        "mailtrap": "^4.3.0",
+        "multer": "^1.4.4",
         "mysql2": "^3.9.7",
-        multer: "^1.4.4",
-        cors: "^2.8.5",
-        qrcode: "^1.5.4",
-        speakeasy: "^2.0.0"
-        
+        "nodemailer": "^7.0.10",
+        "qrcode": "^1.5.4",
+        "redis": "^5.8.3",
+        "socks-proxy-agent": "^8.0.5",
+        "speakeasy": "^2.0.0",
+        "sql.js": "^1.8.0",
+        "tunnel-ssh": "^5.2.0",
+        "user-agents": "^1.1.669",
+        "ws": "^8.17.0"
       }
     };
     
@@ -225,12 +330,21 @@ async function runInstaller() {
     fs.mkdirSync(path.join(projectPath, "uploads"), { recursive: true });
 
     const envExample = `ENCRYPTION_KEY=your-secure-encryption-key-here
+MAILTRAP_API_TOKEN=your_mailtrap_api_token_here
+SMTP_FROM_EMAIL=hello@dumb-msg.xyz
+SMTP_FROM_NAME=Dumb Messenger
+APP_URL=http://localhost:${answers.port}
+REDIS_URL=redis://localhost:6379
+REDIS_PASSWORD=your_redis_password_here
+${answers.proxy === "enable" ? `
+PROXY_USER=your_proxy_username
+PROXY_PASS=your_proxy_password` : ''}
 ${answers.dbType === 'mysql' ? `
-DB_HOST=localhost
-DB_PORT=3306
-DB_USER=root
-DB_PASSWORD=your-mysql-password
-DB_NAME=dumb_messenger` : ''}`;
+MYSQL_HOST=localhost
+MYSQL_PORT=3306
+MYSQL_USER=root
+MYSQL_PASSWORD=your_mysql_password
+MYSQL_DATABASE=dumbmessenger` : ''}`;
 
     fs.writeFileSync(path.join(projectPath, ".env.example"), envExample);
 
@@ -238,25 +352,35 @@ DB_NAME=dumb_messenger` : ''}`;
     execSync("npm install", { cwd: projectPath, stdio: "inherit" });
 
     console.log("🧹 Cleaning up...");
-    execSync("rm -rf temp_repo", { stdio: "inherit" });
+    if (isOnline) {
+      execSync("rm -rf temp_repo", { stdio: "inherit" });
+    }
 
     console.log(gradient("green", "blue").multiline([
       "\n✅ DUMB Messenger installed successfully!",
       "",
       "📋 Next steps:",
       `1. cd ${answers.folder}`,
-      "2. Configure your database (if using MySQL)",
-      "3. Set ENCRYPTION_KEY in environment variables",
-      "4. npm start",
+      "2. Copy .env.example to .env and configure your settings",
+      "3. Configure your database (if using MySQL)",
+      "4. Set MAILTRAP_API_TOKEN for email functionality",
+      "5. npm start",
       "",
       "🌐 Your server will be available at:",
-      `   http://localhost:${answers.port}`
+      `   http://localhost:${answers.port}`,
+      "",
+      "📧 Email: " + (answers.email === "enable" ? "Enabled with Mailtrap" : "Disabled"),
+      "🗄️  Redis: " + (answers.redis === "enable" ? "Enabled for caching" : "Disabled"),
+      "🔌 Proxy: " + (answers.proxy === "enable" ? "Enabled for external requests" : "Disabled"),
+      "💾 Database: " + answers.dbType
     ]));
 
   } catch (err) {
     console.error("❌ Installation failed:", err);
     try { 
-      execSync("rm -rf temp_repo"); 
+      if (fs.existsSync("temp_repo")) {
+        execSync("rm -rf temp_repo"); 
+      }
       if (fs.existsSync(projectPath)) {
         execSync(`rm -rf ${projectPath}`);
       }

@@ -1,9 +1,3 @@
-// hook (insert evil emoji)
-import { loadPlugins, applyPlugins } from "./dumix.js";
-await loadPlugins("./plugins");
-await applyPlugins();
-
-// imports
 import express from "express";
 import cors from "cors";
 import multer from "multer";
@@ -12,15 +6,18 @@ import { Crypto as crypto } from "./modules/crypto.js";
 import fs from "fs";
 import path from "path";
 import config from "./config.js";
-const emailService = new EmailService(config.email);
 import * as storage from "./storage/storage.js";
 import { TOTP as speakeasy } from "./modules/speakeasy.js";
 import { QRCode } from "./modules/qrcode.js";
-import { SSEServer } from "./modules/sse.js";
 import { EmailService } from './modules/email.js';
 import { anse2_encrypt_wasm, anse2_decrypt_wasm, anse2_init_wasm } from "@akaruineko1/anse2";
 import { RedisService } from "./modules/redis.js";
 import { Logger } from './modules/logger.js';
+import { BotSystem } from './modules/bots.js';
+import { ModerationSystem } from './modules/moderation.js';
+import { Firewall } from './modules/firewall.js';
+import { RateLimiter } from './modules/limiter.js';
+import { ProxyManager } from './modules/proxy.js';
 import https from "https";
 
 anse2_init_wasm();
@@ -31,6 +28,17 @@ app.use(express.json({ limit: "1mb" }));
 
 const redisService = new RedisService(config.redis || { enabled: false });
 await redisService.connect();
+
+const emailService = new EmailService(config.email);
+const botSystem = new BotSystem(storage, null);
+const moderationSystem = new ModerationSystem(storage);
+const firewall = new Firewall(config.firewall || {});
+const globalRateLimiter = new RateLimiter(config.rateLimit.windowMs, config.rateLimit.max);
+
+let proxyManager = null;
+if (config.proxy && config.proxy.enabled) {
+    proxyManager = new ProxyManager(config.proxy);
+}
 
 if (config.features.uploads && !fs.existsSync(config.uploads.dir)) {
     fs.mkdirSync(config.uploads.dir, { recursive: true });
@@ -101,22 +109,6 @@ const channelAuthMiddleware = async (req, res, next) => {
     });
 };
 
-const limiter = () => {
-    const hits = new Map();
-    return (req, res, next) => {
-        const now = Date.now();
-        const ip = req.ip || "unknown";
-        const fresh = (hits.get(ip) || []).filter(x => now - x < config.rateLimit.windowMs);
-        fresh.push(now);
-        hits.set(ip, fresh);
-
-        if (fresh.length > config.rateLimit.max) {
-            return res.status(429).json({ error: "rate limit" });
-        }
-        next();
-    };
-};
-
 const cacheMiddleware = (ttlSeconds = 300) => {
     return async (req, res, next) => {
         if (!config.redis?.enabled) {
@@ -159,8 +151,16 @@ const checkNPMUpdates = async () => {
             }
         };
 
+        let request;
+        if (proxyManager) {
+            const agent = proxyManager.getProxyAgent();
+            if (agent) {
+                options.agent = agent;
+            }
+        }
+
         return new Promise((resolve, reject) => {
-            const req = https.request(options, (res) => {
+            request = https.request(options, (res) => {
                 let data = '';
                 res.on('data', chunk => data += chunk);
                 res.on('end', () => {
@@ -177,16 +177,16 @@ const checkNPMUpdates = async () => {
                 });
             });
 
-            req.on('error', (error) => {
+            request.on('error', (error) => {
                 resolve(null);
             });
 
-            req.setTimeout(5000, () => {
-                req.destroy();
+            request.setTimeout(5000, () => {
+                request.destroy();
                 resolve(null);
             });
 
-            req.end();
+            request.end();
         });
     } catch (error) {
         return null;
@@ -195,6 +195,11 @@ const checkNPMUpdates = async () => {
 
 const actionHandlers = {
     register: async ({ username, password }, user) => {
+        const banCheck = await moderationSystem.checkBan(username);
+        if (banCheck.banned) {
+            return { error: "banned", reason: banCheck.reason };
+        }
+
         if (typeof username !== "string" || typeof password !== "string") {
             return { error: "bad input" };
         }
@@ -219,6 +224,11 @@ const actionHandlers = {
         const u = await storage.authenticate(username, password);
         if (!u) {
             return { error: "login failed" };
+        }
+
+        const banCheck = await moderationSystem.checkBan(username);
+        if (banCheck.banned) {
+            return { error: "banned", reason: banCheck.reason };
         }
 
         const twoFactorEnabled = await storage.isTwoFactorEnabled(username);
@@ -669,15 +679,15 @@ const actionHandlers = {
             action: "new"
         };
 
-        wsClients.forEach(client => {
-            if (client.readyState === 1) {
-                client.send(JSON.stringify(messageToSend));
+        wss.broadcast(messageToSend);
+
+        sseClients.forEach(client => {
+            if (client.user === user) {
+                client.res.write(`data: ${JSON.stringify(messageToSend)}\n\n`);
             }
         });
 
-        sseClients.forEach(client => {
-            client.res.write(`data: ${JSON.stringify(messageToSend)}\n\n`);
-        });
+        await botSystem.processMessageForBots(saved);
 
         if (config.redis?.enabled) {
             redisService.invalidateChannel(channel).catch(err => {});
@@ -722,15 +732,15 @@ const actionHandlers = {
             action: "new"
         };
 
-        wsClients.forEach(client => {
-            if (client.readyState === 1) {
-                client.send(JSON.stringify(messageToSend));
+        wss.broadcast(messageToSend);
+
+        sseClients.forEach(client => {
+            if (client.user === user) {
+                client.res.write(`data: ${JSON.stringify(messageToSend)}\n\n`);
             }
         });
 
-        sseClients.forEach(client => {
-            client.res.write(`data: ${JSON.stringify(messageToSend)}\n\n`);
-        });
+        await botSystem.processMessageForBots(saved);
 
         if (config.redis?.enabled) {
             redisService.invalidateChannel(channel).catch(err => {});
@@ -813,15 +823,14 @@ const actionHandlers = {
 
         await storage.saveWebRTCOffer(user, toUser, offer, channel);
 
-        const offerData = JSON.stringify({
+        const offerData = {
             type: "webrtc-offer",
             from: user,
             offer: offer,
             channel: channel
-        });
+        };
 
-        [...wsClients].filter(ws => ws.user === toUser && ws.readyState === 1)
-            .forEach(ws => { try { ws.send(offerData); } catch {} });
+        wss.broadcast(offerData);
 
         return { success: true };
     },
@@ -833,14 +842,13 @@ const actionHandlers = {
 
         await storage.saveWebRTCAnswer(user, toUser, answer);
 
-        const answerData = JSON.stringify({
+        const answerData = {
             type: "webrtc-answer",
             from: user,
             answer: answer
-        });
+        };
 
-        [...wsClients].filter(ws => ws.user === toUser && ws.readyState === 1)
-            .forEach(ws => { try { ws.send(answerData); } catch {} });
+        wss.broadcast(answerData);
 
         return { success: true };
     },
@@ -852,14 +860,13 @@ const actionHandlers = {
 
         await storage.saveICECandidate(user, toUser, candidate);
 
-        const candidateData = JSON.stringify({
+        const candidateData = {
             type: "webrtc-ice-candidate",
             from: user,
             candidate: candidate
-        });
+        };
 
-        [...wsClients].filter(ws => ws.user === toUser && ws.readyState === 1)
-            .forEach(ws => { try { ws.send(candidateData); } catch {} });
+        wss.broadcast(candidateData);
 
         return { success: true };
     },
@@ -902,10 +909,12 @@ const actionHandlers = {
             return { error: "missing targetUser" };
         }
 
-        const endCallData = JSON.stringify({ type: "webrtc-end-call", from: user });
+        const endCallData = {
+            type: "webrtc-end-call",
+            from: user
+        };
 
-        [...wsClients].filter(ws => ws.user === targetUser && ws.readyState === 1)
-            .forEach(ws => { try { ws.send(endCallData); } catch {} });
+        wss.broadcast(endCallData);
 
         return { success: true };
     },
@@ -1008,6 +1017,69 @@ const actionHandlers = {
                 hasUpdates: false 
             };
         }
+    },
+
+    banUser: async ({ username, durationMs, reason }, user) => {
+        if (!user || user !== 'admin') {
+            return { error: "unauthorized" };
+        }
+
+        const result = await moderationSystem.banUser(username, durationMs, reason, user);
+        return { success: true, result };
+    },
+
+    unbanUser: async ({ username }, user) => {
+        if (!user || user !== 'admin') {
+            return { error: "unauthorized" };
+        }
+
+        const result = await moderationSystem.unbanUser(username, user);
+        return { success: true, result };
+    },
+
+    warnUser: async ({ username, reason }, user) => {
+        if (!user || user !== 'admin') {
+            return { error: "unauthorized" };
+        }
+
+        const result = await moderationSystem.warnUser(username, reason, user);
+        return { success: true, result };
+    },
+
+    getBot: async ({ username }, user) => {
+        if (!user) {
+            return { error: "not auth" };
+        }
+
+        const bots = botSystem.getUserBots(user);
+        const bot = bots.find(b => b.username === username);
+        return { success: true, bot };
+    },
+
+    createBot: async ({ username, webhookUrl }, user) => {
+        if (!user) {
+            return { error: "not auth" };
+        }
+
+        try {
+            const bot = await botSystem.registerBot(username, user, webhookUrl);
+            return { success: true, bot };
+        } catch (error) {
+            return { error: error.message };
+        }
+    },
+
+    deleteBot: async ({ username }, user) => {
+        if (!user) {
+            return { error: "not auth" };
+        }
+
+        try {
+            const result = await botSystem.deleteBot(username, user);
+            return { success: true, result };
+        } catch (error) {
+            return { error: error.message };
+        }
     }
 };
 
@@ -1023,9 +1095,12 @@ const createEndpoint = (method, path, middleware, action, paramMap = null) => {
     });
 };
 
-createEndpoint('post', '/api/register', limiter(), 'register');
-createEndpoint('post', '/api/login', limiter(), 'login');
-createEndpoint('post', '/api/2fa/verify-login', limiter(), 'verify2FALogin');
+app.use(globalRateLimiter.middleware());
+app.use(firewall.middleware());
+
+createEndpoint('post', '/api/register', [], 'register');
+createEndpoint('post', '/api/login', [], 'login');
+createEndpoint('post', '/api/2fa/verify-login', [], 'verify2FALogin');
 createEndpoint('post', '/api/2fa/setup', require2FAMiddleware, 'setup2FA');
 createEndpoint('post', '/api/2fa/enable', require2FAMiddleware, 'enable2FA');
 createEndpoint('post', '/api/2fa/disable', require2FAMiddleware, 'disable2FA');
@@ -1057,8 +1132,14 @@ createEndpoint('post', '/api/webrtc/end-call', require2FAMiddleware, 'webrtcEndC
 createEndpoint('post', '/api/voice/upload', require2FAMiddleware, 'uploadVoiceMessage');
 createEndpoint('post', '/api/email/verify', require2FAMiddleware, 'verifyEmail');
 createEndpoint('post', '/api/email/send-verification', require2FAMiddleware, 'sendVerificationEmail');
-createEndpoint('post', '/api/auth/reset-password', limiter(), 'requestPasswordReset');
-createEndpoint('post', '/api/auth/reset-password/confirm', limiter(), 'resetPassword');
+createEndpoint('post', '/api/auth/reset-password', [], 'requestPasswordReset');
+createEndpoint('post', '/api/auth/reset-password/confirm', [], 'resetPassword');
+createEndpoint('post', '/api/admin/ban', require2FAMiddleware, 'banUser');
+createEndpoint('post', '/api/admin/unban', require2FAMiddleware, 'unbanUser');
+createEndpoint('post', '/api/admin/warn', require2FAMiddleware, 'warnUser');
+createEndpoint('post', '/api/bots/create', require2FAMiddleware, 'createBot');
+createEndpoint('get', '/api/bots/:username', require2FAMiddleware, 'getBot');
+createEndpoint('delete', '/api/bots/:username', require2FAMiddleware, 'deleteBot');
 
 app.get("/api/ping", (req, res) => {
     res.json({ success: true, message: "pong" });
@@ -1217,6 +1298,8 @@ server.on("upgrade", (req, socket, head) => {
     });
 });
 
+botSystem.wss = wss;
+
 const interval = setInterval(() => {
     wsClients.forEach(ws => {
         if (!ws.isAlive) {
@@ -1241,6 +1324,9 @@ const interval = setInterval(() => {
 
 process.on("SIGTERM", () => {
     clearInterval(interval);
+    if (proxyManager) {
+        proxyManager.cleanup();
+    }
     server.close(() => {
         process.exit(0);
     });

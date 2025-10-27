@@ -1,5 +1,4 @@
 import { EventEmitter } from 'events';
-import { createServer } from 'http';
 
 export class WebSocketServer extends EventEmitter {
   constructor(options = {}) {
@@ -120,5 +119,13 @@ export class WebSocketServer extends EventEmitter {
     }
     
     return unmasked.toString('utf8');
+  }
+
+  broadcast(data) {
+    this.clients.forEach(client => {
+      if (client.readyState === 1) {
+        client.send(JSON.stringify(data));
+      }
+    });
   }
 }
