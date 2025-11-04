@@ -5,7 +5,30 @@ import { execSync, execFileSync } from "child_process";
 import process from "process";
 import inquirer from "inquirer";
 import gradient from "gradient-string";
-import https from "https";
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+function findTemplatesDir() {
+  const possiblePaths = [
+    path.join(__dirname, '..', 'templates'),
+    path.join(__dirname, 'templates'),
+    path.join(process.cwd(), 'node_modules', 'dpkgdumb', 'templates'),
+    path.join(process.cwd(), 'node_modules', '.bin', '..', 'templates'),
+    path.join(process.cwd(), 'templates')
+  ];
+
+  for (const templatePath of possiblePaths) {
+    console.log(`🔍 Checking: ${templatePath}`);
+    if (fs.existsSync(templatePath) && fs.existsSync(path.join(templatePath, 'server.js'))) {
+      console.log(`✅ Found templates at: ${templatePath}`);
+      return templatePath;
+    }
+  }
+  
+  return null;
+}
 
 async function runInstaller() {
   console.log(gradient("cyan", "magenta").multiline([
@@ -85,12 +108,16 @@ async function runInstaller() {
   }
 
   try {
-    console.log("\n📍 Using local template folder");
-    const templatesPath = "templates/";
-
-    if (!fs.existsSync(templatesPath)) {
-      console.log("❌ Local templates folder not found!");
-      console.log("Please make sure the 'templates' folder exists in the current directory.");
+    console.log("\n🔍 Looking for templates...");
+    const packageTemplatesPath = findTemplatesDir();
+    
+    if (!packageTemplatesPath) {
+      console.log("❌ Templates not found!");
+      console.log("Tried paths:");
+      console.log("- " + path.join(__dirname, '..', 'templates'));
+      console.log("- " + path.join(__dirname, 'templates'));
+      console.log("- " + path.join(process.cwd(), 'node_modules', 'dpkgdumb', 'templates'));
+      console.log("\nPlease make sure the package is properly installed.");
       process.exit(1);
     }
 
@@ -109,42 +136,46 @@ async function runInstaller() {
     ];
 
     filesToCopy.forEach(file => {
-      const src = path.join(templatesPath, file);
+      const src = path.join(packageTemplatesPath, file);
       const dest = path.join(projectPath, file);
       if (fs.existsSync(src)) {
         fs.copyFileSync(src, dest);
+        console.log(`✅ Copied: ${file}`);
       } else {
         console.log(`⚠️  Warning: ${file} not found in templates`);
       }
     });
 
-    const modulesSrcDir = path.join(templatesPath, "modules");
+    const modulesSrcDir = path.join(packageTemplatesPath, "modules");
     if (fs.existsSync(modulesSrcDir)) {
       const moduleFiles = fs.readdirSync(modulesSrcDir);
       moduleFiles.forEach(file => {
         const src = path.join(modulesSrcDir, file);
         const dest = path.join(projectPath, "modules", file);
         fs.copyFileSync(src, dest);
+        console.log(`✅ Copied module: ${file}`);
       });
     } else {
       console.log("⚠️  Warning: modules directory not found in templates");
     }
 
-    const storageSrc = path.join(templatesPath, "storage", "storage.js");
+    const storageSrc = path.join(packageTemplatesPath, "storage", "storage.js");
     const storageDest = path.join(projectPath, "storage", "storage.js");
     if (fs.existsSync(storageSrc)) {
       fs.copyFileSync(storageSrc, storageDest);
+      console.log("✅ Copied: storage/storage.js");
     } else {
       console.log("⚠️  Warning: storage.js not found in templates");
     }
 
-    const slavesSrcDir = path.join(templatesPath, "storage", "slaves");
+    const slavesSrcDir = path.join(packageTemplatesPath, "storage", "slaves");
     if (fs.existsSync(slavesSrcDir)) {
       const slaveFiles = fs.readdirSync(slavesSrcDir);
       slaveFiles.forEach(file => {
         const src = path.join(slavesSrcDir, file);
         const dest = path.join(projectPath, "storage", "slaves", file);
         fs.copyFileSync(src, dest);
+        console.log(`✅ Copied slave: ${file}`);
       });
     } else {
       console.log("⚠️  Warning: slaves directory not found in templates");
@@ -330,7 +361,6 @@ FIREBASE_SERVICE_ACCOUNT=your_firebase_service_account_json_here`;
       "🗄️  Redis: " + (answers.redis === "enable" ? "Enabled for caching" : "Disabled"),
       "💾 Database: " + answers.dbType,
       "",
-      "💡 Note: Installed in OFFLINE mode using local templates",
       "🔧 Used --legacy-peer-deps for package installation"
     ]));
 

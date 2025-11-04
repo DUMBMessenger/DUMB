@@ -1,6 +1,6 @@
 {
   "name": "dpkgdumb",
-  "version": "1.0.45",
+  "version": "1.0.46",
   "description": "Lightweight Decentralised Messenger",
   "type": "module",
   "bin": {
@@ -30,7 +30,8 @@
   "files": [
     "bin/",
     "README.md",
-    "templates/"
+    "LICENSE.md",
+    "templates"
   ],
   "license": "SEE LICENSE IN LICENSE.md",
   "repository": {
