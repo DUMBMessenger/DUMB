@@ -123,11 +123,26 @@ export class MailtrapService {
   }
 
   htmlToText(html) {
-    return html
-      .replace(/<style[^>]*>.*?<\/style>/gs, '')
-      .replace(/<script[^>]*>.*?<\/script>/gs, '')
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
+    let result = '';
+    let inTag = false;
+    for (let i = 0; i < html.length; i++) {
+      const char = html[i];
+      if (char === '<') {
+        inTag = true;
+      } else if (char === '>') {
+        inTag = false;
+        continue;
+      }
+      if (!inTag) {
+        result += char;
+      }
+    }
+    result = result.replace(/\s+/g, ' ').trim();
+    result = result
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  
+    return result;
   }
 }
