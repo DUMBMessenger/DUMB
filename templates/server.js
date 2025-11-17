@@ -18,6 +18,7 @@ import { ModerationSystem } from './modules/moderation.js';
 import { Firewall } from './modules/firewall.js';
 import { RateLimiter } from './modules/limiter.js';
 import { ProxyManager } from './modules/proxy.js';
+import { NotificationManager } from './modules/notifications.js';
 import https from "https";
 
 anse2_init_wasm();
@@ -70,6 +71,9 @@ const sseClients = new Set();
 
 const genToken = () => crypto.randomBytes(32).toString("hex");
 const pending2FASessions = new Map();
+
+const notificationManager = new NotificationManager(storage, null, null);
+const notificationService = notificationManager.getService();
 
 const authMiddleware = async (req, res, next) => {
     const auth = req.headers.authorization?.split(" ") || [];
@@ -211,6 +215,7 @@ const actionHandlers = {
         try {
             const result = await storage.registerUser(username.trim(), password.trim());
             if (result) {
+                await notificationService.sendWelcomeNotification(username.trim());
                 return { success: true };
             } else {
                 return { error: "user exists" };
@@ -688,6 +693,7 @@ const actionHandlers = {
         });
 
         await botSystem.processMessageForBots(saved);
+        await notificationService.onNewMessage(saved);
 
         if (config.redis?.enabled) {
             redisService.invalidateChannel(channel).catch(err => {});
@@ -741,6 +747,7 @@ const actionHandlers = {
         });
 
         await botSystem.processMessageForBots(saved);
+        await notificationService.onNewMessage(saved);
 
         if (config.redis?.enabled) {
             redisService.invalidateChannel(channel).catch(err => {});
@@ -1095,6 +1102,40 @@ const createEndpoint = (method, path, middleware, action, paramMap = null) => {
     });
 };
 
+app.use(notificationManager.middleware());
+notificationManager.setupRoutes(app);
+
+app.get("/api/user/:username/avatar", async (req, res) => {
+    try {
+        const users = await storage.getUsers();
+        const user = users.find(u => u.username === req.params.username);
+
+        if (!user?.avatar) {
+            return res.status(404).json({ error: "avatar not found" });
+        }
+
+        if (!fs.existsSync(path.join(config.uploads.dir, user.avatar))) {
+            return res.status(404).json({ error: "avatar file not found" });
+        }
+
+        const extension = path.extname(user.avatar).toLowerCase();
+        let mimeType = 'image/jpeg';
+        if (extension === '.png') mimeType = 'image/png';
+        else if (extension === '.gif') mimeType = 'image/gif';
+        else if (extension === '.webp') mimeType = 'image/webp';
+        else if (extension === '.jpg' || extension === '.jpeg') mimeType = 'image/jpeg';
+
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+        res.setHeader('Content-Type', mimeType);
+
+        res.sendFile(user.avatar, { root: config.uploads.dir });
+    } catch (error) {
+        res.status(500).json({ success: false, error: "server error" });
+    }
+});
+
 app.use(globalRateLimiter.middleware());
 app.use(firewall.middleware());
 
@@ -1172,25 +1213,6 @@ app.post("/api/upload/file", require2FAMiddleware, fileUpload.single("file"), as
     }
 });
 
-app.get("/api/user/:username/avatar", async (req, res) => {
-    try {
-        const users = await storage.getUsers();
-        const user = users.find(u => u.username === req.params.username);
-
-        if (!user?.avatar) {
-            return res.status(404).json({ error: "avatar not found" });
-        }
-
-        if (!fs.existsSync(path.join(config.uploads.dir, user.avatar))) {
-            return res.status(404).json({ error: "avatar file not found" });
-        }
-
-        res.sendFile(user.avatar, { root: config.uploads.dir });
-    } catch (error) {
-        res.status(500).json({ success: false, error: "server error" });
-    }
-});
-
 app.post("/api/upload/voice/:voiceId", require2FAMiddleware, multer().single('voice'), async (req, res) => {
     try {
         const voiceId = req.params.voiceId;
@@ -1210,25 +1232,17 @@ app.post("/api/upload/voice/:voiceId", require2FAMiddleware, multer().single('vo
 
 app.get("/api/download/:filename", (req, res) => {
     const filename = req.params.filename;
-    // Build the absolute path to the file, normalize and resolve symlinks
-    let requestedPath;
-    try {
-        requestedPath = path.resolve(config.uploads.dir, filename);
-        requestedPath = fs.realpathSync(requestedPath);
-    } catch (e) {
-        return res.status(400).json({ error: "invalid filename or path" });
-    }
-    // Ensure the resolved path is under uploads directory
-    const uploadsDir = fs.realpathSync(config.uploads.dir);
-    if (!requestedPath.startsWith(uploadsDir + path.sep)) {
-        return res.status(403).json({ error: "forbidden" });
+    const filePath = path.join(config.uploads.dir, filename);
+
+    if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
+        return res.status(400).json({ error: "invalid filename" });
     }
 
-    if (fs.existsSync(requestedPath)) {
+    if (fs.existsSync(filePath)) {
         const originalName = storage.getOriginalFileName(filename);
         
         res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(originalName)}"`);
-        res.download(requestedPath, originalName);
+        res.download(filePath, originalName);
     } else {
         res.status(404).json({ success: false, error: "file not found" });
     }
@@ -1305,6 +1319,18 @@ server.on("upgrade", (req, socket, head) => {
         socket.destroy();
     });
 });
+
+notificationService.wss = wss;
+notificationService.sse = { 
+    clients: sseClients,
+    sendToUser: (userId, data) => {
+        sseClients.forEach(client => {
+            if (client.user === userId) {
+                client.res.write(`data: ${JSON.stringify(data)}\n\n`);
+            }
+        });
+    }
+};
 
 botSystem.wss = wss;
 

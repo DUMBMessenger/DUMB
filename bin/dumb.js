@@ -20,9 +20,7 @@ function findTemplatesDir() {
   ];
 
   for (const templatePath of possiblePaths) {
-    console.log(`🔍 Checking: ${templatePath}`);
     if (fs.existsSync(templatePath) && fs.existsSync(path.join(templatePath, 'server.js'))) {
-      console.log(`✅ Found templates at: ${templatePath}`);
       return templatePath;
     }
   }
@@ -140,9 +138,6 @@ async function runInstaller() {
       const dest = path.join(projectPath, file);
       if (fs.existsSync(src)) {
         fs.copyFileSync(src, dest);
-        console.log(`✅ Copied: ${file}`);
-      } else {
-        console.log(`⚠️  Warning: ${file} not found in templates`);
       }
     });
 
@@ -153,19 +148,13 @@ async function runInstaller() {
         const src = path.join(modulesSrcDir, file);
         const dest = path.join(projectPath, "modules", file);
         fs.copyFileSync(src, dest);
-        console.log(`✅ Copied module: ${file}`);
       });
-    } else {
-      console.log("⚠️  Warning: modules directory not found in templates");
     }
 
     const storageSrc = path.join(packageTemplatesPath, "storage", "storage.js");
     const storageDest = path.join(projectPath, "storage", "storage.js");
     if (fs.existsSync(storageSrc)) {
       fs.copyFileSync(storageSrc, storageDest);
-      console.log("✅ Copied: storage/storage.js");
-    } else {
-      console.log("⚠️  Warning: storage.js not found in templates");
     }
 
     const slavesSrcDir = path.join(packageTemplatesPath, "storage", "slaves");
@@ -175,10 +164,7 @@ async function runInstaller() {
         const src = path.join(slavesSrcDir, file);
         const dest = path.join(projectPath, "storage", "slaves", file);
         fs.copyFileSync(src, dest);
-        console.log(`✅ Copied slave: ${file}`);
       });
-    } else {
-      console.log("⚠️  Warning: slaves directory not found in templates");
     }
 
     console.log("⚙️  Creating configuration...");
@@ -202,7 +188,9 @@ async function runInstaller() {
     uploads: ${answers.uploads === "enable"},
     webRTC: ${answers.voip === "enable"},
     twoFactor: true,
-    voiceMessages: true
+    voiceMessages: true,
+    notifications: true,
+    pushNotifications: true
   },
   email: {
     enabled: ${answers.email === "enable"},
@@ -228,15 +216,16 @@ async function runInstaller() {
     appUrl: process.env.APP_URL || 'http://localhost:${answers.port}'
   },
   redis: {
-      enabled: ${answers.redis === "enable"},
-      url: process.env.REDIS_URL || 'redis://localhost:6379',
-      password: process.env.REDIS_PASSWORD,
-      cache: {
-        messagesTtl: 300,
-        usersTtl: 600,
-        channelsTtl: 900
-      }
-    },
+    enabled: ${answers.redis === "enable"},
+    url: process.env.REDIS_URL || 'redis://localhost:6379',
+    password: process.env.REDIS_PASSWORD,
+    cache: {
+      messagesTtl: 300,
+      usersTtl: 600,
+      channelsTtl: 900,
+      notificationsTtl: 300
+    }
+  },
   security: {
     passwordMinLength: 8,
     tokenTTL: 24 * 60 * 60 * 1000,
@@ -274,6 +263,57 @@ async function runInstaller() {
   },
   ws: {
     port: ${parseInt(answers.port) + 1}
+  },
+  notifications: {
+    enabled: true,
+    queue: {
+      maxSize: 100,
+      processInterval: 5 * 60 * 1000
+    },
+    push: {
+      vapid: {
+        subject: process.env.VAPID_SUBJECT || 'mailto:admin@dumb-msg.xyz',
+        publicKey: process.env.VAPID_PUBLIC_KEY || 'your-public-vapid-key',
+        privateKey: process.env.VAPID_PRIVATE_KEY || 'your-private-vapid-key'
+      },
+      ttl: 3600,
+      urgency: {
+        normal: 'normal',
+        high: 'high'
+      },
+      maxErrorCount: 5
+    },
+    realtime: {
+      webSocket: true,
+      sse: true
+    },
+    cleanup: {
+      subscriptionsInterval: 60 * 60 * 1000,
+      notificationsInterval: 60 * 60 * 1000
+    },
+    defaults: {
+      subscriptionExpiry: 30 * 24 * 60 * 60 * 1000,
+      notificationExpiry: 7 * 24 * 60 * 60 * 1000,
+      priority: 'normal'
+    },
+    types: {
+      message: {
+        title: 'New message in {channel}',
+        priority: 'normal'
+      },
+      mention: {
+        title: 'You were mentioned in {channel}',
+        priority: 'high'
+      },
+      direct_message: {
+        title: 'Message from {sender}',
+        priority: 'high'
+      },
+      system: {
+        title: 'System notification',
+        priority: 'normal'
+      }
+    }
   }
 };`;
 

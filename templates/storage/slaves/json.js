@@ -17,7 +17,10 @@ let db = {
   files: [],
   emailVerifications: [],
   passwordResets: [],
-  bans: []
+  bans: [],
+  pushSubscriptions: [],
+  notifications: [],
+  channelSubscriptions: []
 };
 const file = config.storage.file;
 
@@ -407,6 +410,153 @@ export function removeBan(username) {
     return true;
   }
   return false;
+}
+
+export function savePushSubscription(userId, subscription) {
+  if (!db.pushSubscriptions.find(s => s.userId === userId && s.id === subscription.id)) {
+    db.pushSubscriptions.push({
+      userId,
+      ...subscription
+    });
+    save();
+  }
+  return Promise.resolve();
+}
+
+export function deletePushSubscription(userId, subscriptionId) {
+  const initialLength = db.pushSubscriptions.length;
+  db.pushSubscriptions = db.pushSubscriptions.filter(s => 
+    !(s.userId === userId && s.id === subscriptionId)
+  );
+  if (db.pushSubscriptions.length !== initialLength) {
+    save();
+  }
+  return Promise.resolve();
+}
+
+export function getPushSubscriptions(userId) {
+  return Promise.resolve(db.pushSubscriptions.filter(s => s.userId === userId));
+}
+
+export function saveNotification(notification) {
+  if (!db.notifications.find(n => n.id === notification.id)) {
+    db.notifications.push(notification);
+    save();
+  }
+  return Promise.resolve();
+}
+
+export function markNotificationAsRead(userId, notificationId) {
+  const notification = db.notifications.find(n => 
+    n.userId === userId && n.id === notificationId
+  );
+  if (notification) {
+    notification.read = true;
+    save();
+  }
+  return Promise.resolve();
+}
+
+export function markAllNotificationsAsRead(userId) {
+  db.notifications.forEach(n => {
+    if (n.userId === userId) {
+      n.read = true;
+    }
+  });
+  save();
+  return Promise.resolve();
+}
+
+export function getUserNotifications(userId, options = {}) {
+  const { limit = 50, offset = 0, unreadOnly = false, types = [] } = options;
+  
+  let notifications = db.notifications.filter(n => n.userId === userId);
+  
+  if (unreadOnly) {
+    notifications = notifications.filter(n => !n.read);
+  }
+  
+  if (types.length > 0) {
+    notifications = notifications.filter(n => types.includes(n.type));
+  }
+  
+  notifications.sort((a, b) => b.timestamp - a.timestamp);
+  
+  return Promise.resolve(notifications.slice(offset, offset + limit));
+}
+
+export function getUnreadNotificationCount(userId) {
+  const count = db.notifications.filter(n => 
+    n.userId === userId && !n.read
+  ).length;
+  return Promise.resolve(count);
+}
+
+export function deleteNotification(userId, notificationId) {
+  const initialLength = db.notifications.length;
+  db.notifications = db.notifications.filter(n => 
+    !(n.userId === userId && n.id === notificationId)
+  );
+  if (db.notifications.length !== initialLength) {
+    save();
+  }
+  return Promise.resolve();
+}
+
+export function cleanupExpiredSubscriptions(userId, currentTime) {
+  const initialLength = db.pushSubscriptions.length;
+  db.pushSubscriptions = db.pushSubscriptions.filter(s => 
+    s.userId !== userId || s.expires > currentTime
+  );
+  if (db.pushSubscriptions.length !== initialLength) {
+    save();
+  }
+  return Promise.resolve();
+}
+
+export function cleanupExpiredNotifications() {
+  const currentTime = Date.now();
+  const initialLength = db.notifications.length;
+  db.notifications = db.notifications.filter(n => n.expires > currentTime);
+  if (db.notifications.length !== initialLength) {
+    save();
+  }
+  return Promise.resolve();
+}
+
+export function saveChannelSubscription(userId, channelId, types) {
+  const existingIndex = db.channelSubscriptions.findIndex(cs => 
+    cs.userId === userId && cs.channelId === channelId
+  );
+  
+  if (existingIndex !== -1) {
+    db.channelSubscriptions[existingIndex].types = types;
+  } else {
+    db.channelSubscriptions.push({
+      userId,
+      channelId,
+      types
+    });
+  }
+  save();
+  return Promise.resolve();
+}
+
+export function deleteChannelSubscription(userId, channelId) {
+  const initialLength = db.channelSubscriptions.length;
+  db.channelSubscriptions = db.channelSubscriptions.filter(cs => 
+    !(cs.userId === userId && cs.channelId === channelId)
+  );
+  if (db.channelSubscriptions.length !== initialLength) {
+    save();
+  }
+  return Promise.resolve();
+}
+
+export function getUserChannelSubscriptions(userId) {
+  return Promise.resolve(
+    db.channelSubscriptions.filter(cs => cs.userId === userId)
+  );
 }
 
 load();

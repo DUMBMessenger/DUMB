@@ -185,6 +185,52 @@ const createSQLiteTables = () => {
       FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE
     )
   `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS push_subscriptions (
+      id TEXT PRIMARY KEY,
+      userId TEXT NOT NULL,
+      endpoint TEXT NOT NULL,
+      keys TEXT NOT NULL,
+      userAgent TEXT,
+      createdAt BIGINT NOT NULL,
+      expires BIGINT NOT NULL,
+      errorCount INTEGER DEFAULT 0,
+      lastError TEXT,
+      FOREIGN KEY (userId) REFERENCES users(username) ON DELETE CASCADE
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS notifications (
+      id TEXT PRIMARY KEY,
+      userId TEXT NOT NULL,
+      type TEXT NOT NULL,
+      title TEXT NOT NULL,
+      body TEXT,
+      data TEXT,
+      image TEXT,
+      icon TEXT,
+      badge TEXT,
+      tag TEXT,
+      timestamp BIGINT NOT NULL,
+      read BOOLEAN DEFAULT FALSE,
+      expires BIGINT NOT NULL,
+      priority TEXT DEFAULT 'normal',
+      actions TEXT,
+      FOREIGN KEY (userId) REFERENCES users(username) ON DELETE CASCADE
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS channel_subscriptions (
+      userId TEXT NOT NULL,
+      channelId TEXT NOT NULL,
+      types TEXT NOT NULL,
+      PRIMARY KEY (userId, channelId),
+      FOREIGN KEY (userId) REFERENCES users(username) ON DELETE CASCADE
+    )
+  `);
 };
 
 const createMySQLTables = async () => {
@@ -314,6 +360,46 @@ const createMySQLTables = async () => {
       expires BIGINT NOT NULL,
       active BOOLEAN DEFAULT TRUE,
       FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE
+    ) ENGINE=InnoDB`,
+
+    `CREATE TABLE IF NOT EXISTS push_subscriptions (
+      id VARCHAR(255) PRIMARY KEY,
+      userId VARCHAR(255) NOT NULL,
+      endpoint TEXT NOT NULL,
+      keys TEXT NOT NULL,
+      userAgent TEXT,
+      createdAt BIGINT NOT NULL,
+      expires BIGINT NOT NULL,
+      errorCount INTEGER DEFAULT 0,
+      lastError TEXT,
+      FOREIGN KEY (userId) REFERENCES users(username) ON DELETE CASCADE
+    ) ENGINE=InnoDB`,
+
+    `CREATE TABLE IF NOT EXISTS notifications (
+      id VARCHAR(255) PRIMARY KEY,
+      userId VARCHAR(255) NOT NULL,
+      type VARCHAR(50) NOT NULL,
+      title TEXT NOT NULL,
+      body TEXT,
+      data TEXT,
+      image TEXT,
+      icon TEXT,
+      badge TEXT,
+      tag TEXT,
+      timestamp BIGINT NOT NULL,
+      read BOOLEAN DEFAULT FALSE,
+      expires BIGINT NOT NULL,
+      priority VARCHAR(50) DEFAULT 'normal',
+      actions TEXT,
+      FOREIGN KEY (userId) REFERENCES users(username) ON DELETE CASCADE
+    ) ENGINE=InnoDB`,
+
+    `CREATE TABLE IF NOT EXISTS channel_subscriptions (
+      userId VARCHAR(255) NOT NULL,
+      channelId VARCHAR(255) NOT NULL,
+      types TEXT NOT NULL,
+      PRIMARY KEY (userId, channelId),
+      FOREIGN KEY (userId) REFERENCES users(username) ON DELETE CASCADE
     ) ENGINE=InnoDB`
   ];
 
@@ -931,6 +1017,175 @@ export async function removeBan(username) {
   } else {
     return result.changes > 0;
   }
+}
+
+export async function savePushSubscription(userId, subscription) {
+  await executeQuery(
+    `INSERT INTO push_subscriptions (id, userId, endpoint, keys, userAgent, createdAt, expires, errorCount, lastError) 
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) 
+     ON DUPLICATE KEY UPDATE endpoint = ?, keys = ?, userAgent = ?, createdAt = ?, expires = ?, errorCount = ?, lastError = ?`,
+    [
+      subscription.id,
+      userId,
+      subscription.endpoint,
+      JSON.stringify(subscription.keys),
+      subscription.userAgent || '',
+      subscription.createdAt,
+      subscription.expires,
+      subscription.errorCount || 0,
+      subscription.lastError || null,
+      subscription.endpoint,
+      JSON.stringify(subscription.keys),
+      subscription.userAgent || '',
+      subscription.createdAt,
+      subscription.expires,
+      subscription.errorCount || 0,
+      subscription.lastError || null
+    ]
+  );
+}
+
+export async function deletePushSubscription(userId, subscriptionId) {
+  await executeQuery(
+    'DELETE FROM push_subscriptions WHERE userId = ? AND id = ?',
+    [userId, subscriptionId]
+  );
+}
+
+export async function getPushSubscriptions(userId) {
+  const subscriptions = await executeQuery(
+    'SELECT * FROM push_subscriptions WHERE userId = ?',
+    [userId]
+  );
+  
+  return subscriptions.map(sub => ({
+    ...sub,
+    keys: JSON.parse(sub.keys)
+  }));
+}
+
+export async function saveNotification(notification) {
+  await executeQuery(
+    `INSERT INTO notifications (id, userId, type, title, body, data, image, icon, badge, tag, timestamp, read, expires, priority, actions) 
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      notification.id,
+      notification.userId,
+      notification.type,
+      notification.title,
+      notification.body,
+      JSON.stringify(notification.data || {}),
+      notification.image,
+      notification.icon,
+      notification.badge,
+      notification.tag,
+      notification.timestamp,
+      notification.read,
+      notification.expires,
+      notification.priority,
+      JSON.stringify(notification.actions || [])
+    ]
+  );
+}
+
+export async function markNotificationAsRead(userId, notificationId) {
+  await executeQuery(
+    'UPDATE notifications SET read = TRUE WHERE userId = ? AND id = ?',
+    [userId, notificationId]
+  );
+}
+
+export async function markAllNotificationsAsRead(userId) {
+  await executeQuery(
+    'UPDATE notifications SET read = TRUE WHERE userId = ?',
+    [userId]
+  );
+}
+
+export async function getUserNotifications(userId, options = {}) {
+  const { limit = 50, offset = 0, unreadOnly = false, types = [] } = options;
+  
+  let sql = 'SELECT * FROM notifications WHERE userId = ?';
+  const params = [userId];
+  
+  if (unreadOnly) {
+    sql += ' AND read = FALSE';
+  }
+  
+  if (types.length > 0) {
+    const placeholders = types.map(() => '?').join(',');
+    sql += ` AND type IN (${placeholders})`;
+    params.push(...types);
+  }
+  
+  sql += ' ORDER BY timestamp DESC LIMIT ? OFFSET ?';
+  params.push(limit, offset);
+  
+  const notifications = await executeQuery(sql, params);
+  
+  return notifications.map(notif => ({
+    ...notif,
+    data: JSON.parse(notif.data || '{}'),
+    actions: JSON.parse(notif.actions || '[]')
+  }));
+}
+
+export async function getUnreadNotificationCount(userId) {
+  const result = await executeQuery(
+    'SELECT COUNT(*) as count FROM notifications WHERE userId = ? AND read = FALSE',
+    [userId]
+  );
+  
+  return result[0].count;
+}
+
+export async function deleteNotification(userId, notificationId) {
+  await executeQuery(
+    'DELETE FROM notifications WHERE userId = ? AND id = ?',
+    [userId, notificationId]
+  );
+}
+
+export async function cleanupExpiredSubscriptions(userId, currentTime) {
+  await executeQuery(
+    'DELETE FROM push_subscriptions WHERE userId = ? AND expires < ?',
+    [userId, currentTime]
+  );
+}
+
+export async function cleanupExpiredNotifications() {
+  await executeQuery(
+    'DELETE FROM notifications WHERE expires < ?',
+    [Date.now()]
+  );
+}
+
+export async function saveChannelSubscription(userId, channelId, types) {
+  await executeQuery(
+    `INSERT INTO channel_subscriptions (userId, channelId, types) 
+     VALUES (?, ?, ?) 
+     ON DUPLICATE KEY UPDATE types = ?`,
+    [userId, channelId, JSON.stringify(types), JSON.stringify(types)]
+  );
+}
+
+export async function deleteChannelSubscription(userId, channelId) {
+  await executeQuery(
+    'DELETE FROM channel_subscriptions WHERE userId = ? AND channelId = ?',
+    [userId, channelId]
+  );
+}
+
+export async function getUserChannelSubscriptions(userId) {
+  const subscriptions = await executeQuery(
+    'SELECT * FROM channel_subscriptions WHERE userId = ?',
+    [userId]
+  );
+  
+  return subscriptions.map(sub => ({
+    ...sub,
+    types: JSON.parse(sub.types)
+  }));
 }
 
 export function validateUsername(username) {

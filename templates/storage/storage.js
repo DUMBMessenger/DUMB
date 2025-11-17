@@ -118,3 +118,45 @@ export const setUserType = backend.setUserType;
 export const saveBan = backend.saveBan;
 export const getBan = backend.getBan;
 export const removeBan = backend.removeBan;
+export const savePushSubscription = async (userId, subscription) => {
+  return await backend.savePushSubscription(userId, subscription);
+};
+export const deletePushSubscription = async (userId, subscriptionId) => {
+  return await backend.deletePushSubscription(userId, subscriptionId);
+};
+export const getPushSubscriptions = async (userId) => {
+  return await backend.getPushSubscriptions(userId);
+};
+export const saveNotification = async (notification) => {
+  return await backend.saveNotification(notification);
+};
+export const markNotificationAsRead = async (userId, notificationId) => {
+  return await backend.markNotificationAsRead(userId, notificationId);
+};
+export const markAllNotificationsAsRead = async (userId) => {
+  return await backend.markAllNotificationsAsRead(userId);
+};
+export const getUserNotifications = async (userId, options = {}) => {
+  return await backend.getUserNotifications(userId, options);
+};
+export const getUnreadNotificationCount = async (userId) => {
+  return await backend.getUnreadNotificationCount(userId);
+};
+export const deleteNotification = async (userId, notificationId) => {
+  return await backend.deleteNotification(userId, notificationId);
+};
+export const cleanupExpiredSubscriptions = async (userId, currentTime) => {
+  return await backend.cleanupExpiredSubscriptions(userId, currentTime);
+};
+export const cleanupExpiredNotifications = async () => {
+  return await backend.cleanupExpiredNotifications();
+};
+export const saveChannelSubscription = async (userId, channelId, types) => {
+  return await backend.saveChannelSubscription(userId, channelId, types);
+};
+export const deleteChannelSubscription = async (userId, channelId) => {
+  return await backend.deleteChannelSubscription(userId, channelId);
+};
+export const getUserChannelSubscriptions = async (userId) => {
+  return await backend.getUserChannelSubscriptions(userId);
+};
