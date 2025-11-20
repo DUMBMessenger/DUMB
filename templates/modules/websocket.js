@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events';
+import crypto from 'crypto';
 
 export class WebSocketServer extends EventEmitter {
   constructor(options = {}) {
@@ -14,118 +15,300 @@ export class WebSocketServer extends EventEmitter {
       return;
     }
 
-    const acceptKey = this.generateAccept(key);
-    socket.write(
-      'HTTP/1.1 101 Switching Protocols\r\n' +
-      'Upgrade: websocket\r\n' +
-      'Connection: Upgrade\r\n' +
-      `Sec-WebSocket-Accept: ${acceptKey}\r\n\r\n`
-    );
+    try {
+      const acceptKey = this.generateAccept(key);
+      
+      const responseHeaders = [
+        'HTTP/1.1 101 Switching Protocols',
+        'Upgrade: websocket',
+        'Connection: Upgrade',
+        `Sec-WebSocket-Accept: ${acceptKey}`,
+        '\r\n'
+      ].join('\r\n');
 
-    const ws = this.createWebSocket(socket);
-    callback(ws);
+      socket.write(responseHeaders);
+
+      const ws = this.createWebSocket(socket, request);
+      callback(ws);
+      
+      if (head && head.length > 0) {
+        this.handleSocketData(ws, head);
+      }
+      
+    } catch (error) {
+      console.error('WebSocket upgrade error:', error);
+      socket.destroy();
+    }
   }
 
   generateAccept(key) {
-    const crypto = require('crypto');
     const sha1 = crypto.createHash('sha1');
     sha1.update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11');
     return sha1.digest('base64');
   }
 
-  createWebSocket(socket) {
+  createWebSocket(socket, request) {
     const ws = {
       socket,
+      request,
       readyState: 1,
       isAlive: true,
-      send: (data) => {
-        if (socket.writable) {
-          const frame = this.createFrame(typeof data === 'string' ? data : JSON.stringify(data));
-          socket.write(frame);
-        }
-      },
-      ping: () => {
-        const pingFrame = Buffer.from([0x89, 0x00]);
-        socket.write(pingFrame);
-      },
-      terminate: () => {
-        socket.destroy();
-      },
+      user: null,
+      buffer: Buffer.alloc(0),
+      
       on: (event, handler) => {
         if (event === 'message') {
-          socket.on('data', (data) => {
-            const message = this.parseFrame(data);
-            if (message) handler(message);
-          });
-        } else {
-          socket.on(event, handler);
+          ws.messageHandler = handler;
         }
+        socket.on(event, handler);
+      },
+      
+      send: (data) => {
+        if (socket.writable && ws.readyState === 1) {
+          try {
+            const dataToSend = typeof data === 'string' ? data : JSON.stringify(data);
+            const frame = this.createFrame(dataToSend);
+            socket.write(frame);
+          } catch (error) {
+            console.error('WebSocket send error:', error);
+          }
+        }
+      },
+      
+      ping: () => {
+        if (socket.writable && ws.readyState === 1) {
+          const pingFrame = this.createFrame('', 0x89);
+          socket.write(pingFrame);
+        }
+      },
+      
+      close: (code = 1000, reason = '') => {
+        if (ws.readyState !== 1) return;
+        
+        ws.readyState = 3;
+        try {
+          const closeFrame = this.createCloseFrame(code, reason);
+          socket.write(closeFrame);
+        } catch (error) {}
+        setTimeout(() => socket.destroy(), 1000);
+      },
+      
+      terminate: () => {
+        ws.readyState = 3;
+        socket.destroy();
       }
     };
 
-    this.clients.add(ws);
-    socket.on('close', () => {
-      ws.readyState = 3;
-      this.clients.delete(ws);
+    socket.on('data', (data) => {
+      this.handleSocketData(ws, data);
     });
 
+    socket.on('close', (hadError) => {
+      ws.readyState = 3;
+      this.clients.delete(ws);
+      this.emit('close', ws);
+    });
+
+    socket.on('error', (error) => {
+      console.error('WebSocket socket error:', error);
+      this.emit('error', ws, error);
+    });
+
+    this.clients.add(ws);
+    
+    setTimeout(() => {
+      if (ws.readyState === 1) {
+        ws.send(JSON.stringify({ 
+          type: 'connected', 
+          message: 'WebSocket connected successfully',
+          timestamp: Date.now()
+        }));
+      }
+    }, 100);
+    
     return ws;
   }
 
-  createFrame(data) {
-    const buffer = Buffer.from(data, 'utf8');
-    const length = buffer.length;
-    
-    let frame;
-    if (length <= 125) {
-      frame = Buffer.alloc(2 + length);
-      frame[1] = length;
-    } else if (length <= 65535) {
-      frame = Buffer.alloc(4 + length);
-      frame[1] = 126;
-      frame.writeUInt16BE(length, 2);
-    } else {
-      frame = Buffer.alloc(10 + length);
-      frame[1] = 127;
-      frame.writeBigUInt64BE(BigInt(length), 2);
+  handleSocketData(ws, data) {
+    try {
+      ws.buffer = Buffer.concat([ws.buffer, data]);
+      
+      while (ws.buffer.length > 0) {
+        const result = this.parseFrame(ws.buffer, ws);
+        if (!result) break;
+        
+        const { message, bytesConsumed } = result;
+        ws.buffer = ws.buffer.slice(bytesConsumed);
+        
+        if (message !== null) {
+          if (ws.messageHandler) {
+            ws.messageHandler(message);
+          }
+          
+          this.emit('message', ws, message);
+        }
+      }
+    } catch (error) {
+      console.error('WebSocket data handling error:', error);
     }
+  }
 
-    frame[0] = 0x81;
-    buffer.copy(frame, frame.length - length);
+  createFrame(data, opcode = 0x81) {
+    const buffer = Buffer.from(data, 'utf8');
+    const payloadLength = buffer.length;
+    
+    let headerLength = 2;
+    let lengthBytes = 0;
+    
+    if (payloadLength <= 125) {
+      lengthBytes = 0;
+    } else if (payloadLength <= 65535) {
+      headerLength += 2;
+      lengthBytes = 126;
+    } else {
+      headerLength += 8;
+      lengthBytes = 127;
+    }
+    
+    const frame = Buffer.alloc(headerLength + payloadLength);
+    
+    frame[0] = opcode;
+    frame[1] = lengthBytes;
+    
+    let offset = 2;
+    if (lengthBytes === 126) {
+      frame.writeUInt16BE(payloadLength, offset);
+      offset += 2;
+    } else if (lengthBytes === 127) {
+      frame.writeBigUInt64BE(BigInt(payloadLength), offset);
+      offset += 8;
+    } else {
+      frame[1] = payloadLength;
+    }
+    
+    buffer.copy(frame, offset);
+    
     return frame;
   }
 
-  parseFrame(buffer) {
-    if (buffer.length < 2) return null;
+  createCloseFrame(code = 1000, reason = '') {
+    const reasonBuffer = Buffer.from(reason, 'utf8');
+    const payloadLength = 2 + reasonBuffer.length;
     
-    const opcode = buffer[0] & 0x0F;
-    if (opcode !== 0x01) return null;
+    let headerLength = 2;
+    let lengthBytes = payloadLength;
     
-    const payloadLength = buffer[1] & 0x7F;
-    let dataStart = 2;
-    
-    if (payloadLength === 126) {
-      dataStart = 4;
-    } else if (payloadLength === 127) {
-      dataStart = 10;
+    if (payloadLength > 125) {
+      headerLength += 2;
+      lengthBytes = 126;
     }
     
-    const mask = buffer.slice(dataStart, dataStart + 4);
-    const payload = buffer.slice(dataStart + 4);
+    const frame = Buffer.alloc(headerLength + payloadLength);
     
-    const unmasked = Buffer.alloc(payload.length);
-    for (let i = 0; i < payload.length; i++) {
-      unmasked[i] = payload[i] ^ mask[i % 4];
+    frame[0] = 0x88;
+    frame[1] = lengthBytes;
+    
+    let offset = 2;
+    if (lengthBytes === 126) {
+      frame.writeUInt16BE(payloadLength, offset);
+      offset += 2;
     }
     
-    return unmasked.toString('utf8');
+    frame.writeUInt16BE(code, offset);
+    offset += 2;
+    
+    reasonBuffer.copy(frame, offset);
+    
+    return frame;
   }
 
-  broadcast(data) {
+  parseFrame(buffer, ws) {
+    if (buffer.length < 2) return null;
+    
+    const firstByte = buffer[0];
+    const secondByte = buffer[1];
+    
+    const opcode = firstByte & 0x0F;
+    const isMasked = (secondByte & 0x80) !== 0;
+    let payloadLength = secondByte & 0x7F;
+    
+    let currentOffset = 2;
+    
+    if (payloadLength === 126) {
+      if (buffer.length < 4) return null;
+      payloadLength = buffer.readUInt16BE(2);
+      currentOffset = 4;
+    } else if (payloadLength === 127) {
+      if (buffer.length < 10) return null;
+      payloadLength = Number(buffer.readBigUInt64BE(2));
+      currentOffset = 10;
+    }
+    
+    if (isMasked) {
+      if (buffer.length < currentOffset + 4) return null;
+      currentOffset += 4;
+    }
+    
+    const totalFrameLength = currentOffset + payloadLength;
+    if (buffer.length < totalFrameLength) {
+      return null;
+    }
+    
+    const payload = buffer.slice(currentOffset, totalFrameLength);
+    
+    let unmaskedPayload = payload;
+    if (isMasked) {
+      const maskingKey = buffer.slice(currentOffset - 4, currentOffset);
+      unmaskedPayload = Buffer.alloc(payloadLength);
+      for (let i = 0; i < payloadLength; i++) {
+        unmaskedPayload[i] = payload[i] ^ maskingKey[i % 4];
+      }
+    }
+    
+    switch (opcode) {
+      case 0x01:
+        try {
+          const text = unmaskedPayload.toString('utf8');
+          return { 
+            message: text, 
+            bytesConsumed: totalFrameLength 
+          };
+        } catch (error) {
+          return { message: null, bytesConsumed: totalFrameLength };
+        }
+      
+      case 0x08:
+        return { message: null, bytesConsumed: totalFrameLength };
+      
+      case 0x09:
+        const pongFrame = this.createFrame('', 0x8A);
+        ws.socket.write(pongFrame);
+        return { message: null, bytesConsumed: totalFrameLength };
+      
+      case 0x0A:
+        ws.isAlive = true;
+        return { message: null, bytesConsumed: totalFrameLength };
+      
+      default:
+        return { message: null, bytesConsumed: totalFrameLength };
+    }
+  }
+
+  broadcast(data, filter = null) {
+    const dataToSend = typeof data === 'string' ? data : JSON.stringify(data);
+    
     this.clients.forEach(client => {
-      if (client.readyState === 1) {
-        client.send(JSON.stringify(data));
+      if (client.readyState === 1 && (!filter || filter(client))) {
+        try {
+          client.send(dataToSend);
+        } catch (error) {
+          console.error('Broadcast error to client:', error);
+        }
       }
     });
+  }
+
+  sendToUser(username, data) {
+    this.broadcast(data, client => client.user === username);
   }
 }
