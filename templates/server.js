@@ -3,6 +3,7 @@ import cors from "cors";
 import multer from "multer";
 import { WebSocketServer } from "./modules/websocket.js";
 import { Crypto as crypto } from "./modules/crypto.js";
+import { DCPProtocol } from "./modules/dcp.js";
 import fs from "fs";
 import path from "path";
 import config from "./config.js";
@@ -20,6 +21,11 @@ import { RateLimiter } from './modules/limiter.js';
 import { ProxyManager } from './modules/proxy.js';
 import { NotificationManager } from './modules/notifications.js';
 import https from "https";
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+
+const __filename = fileURLToPath((typeof document === "undefined") ? import.meta.url : "file://" + process.argv[1]);
+const __dirname = dirname(__filename);
 
 anse2_init_wasm();
 
@@ -28,7 +34,11 @@ app.use(cors({ origin: config.cors.origin }));
 app.use(express.json({ limit: "1mb" }));
 
 const redisService = new RedisService(config.redis || { enabled: false });
-await redisService.connect();
+
+async function initializeRedis() {
+  await redisService.connect();
+}
+initializeRedis().catch(console.error);
 
 const emailService = new EmailService(config.email);
 const botSystem = new BotSystem(storage, null);
@@ -55,8 +65,12 @@ const createUploader = (isAvatar = false) => multer({
     }),
     limits: { fileSize: config.uploads.maxFileSize },
     fileFilter: (req, file, cb) => {
-        if (isAvatar && !config.uploads.allowedMime.includes(file.mimetype)) {
-            cb(new Error('File type not allowed'), false);
+        const allowedTypes = isAvatar 
+            ? config.uploads.allowedAvatarMime || config.uploads.allowedMime
+            : config.uploads.allowedMime;
+        
+        if (!allowedTypes.includes(file.mimetype)) {
+            cb(new Error(`File type not allowed. Allowed types: ${allowedTypes.join(', ')}`), false);
         } else {
             cb(null, true);
         }
@@ -1182,6 +1196,134 @@ createEndpoint('post', '/api/bots/create', require2FAMiddleware, 'createBot');
 createEndpoint('get', '/api/bots/:username', require2FAMiddleware, 'getBot');
 createEndpoint('delete', '/api/bots/:username', require2FAMiddleware, 'deleteBot');
 
+// DCP Protocol API endpoints
+app.post("/api/dcp/initiate", require2FAMiddleware, async (req, res) => {
+    try {
+        const { target, channel, callType = 'audio', metadata = {} } = req.body;
+        
+        if (!target) {
+            return res.status(400).json({ success: false, error: "Target user required" });
+        }
+
+        // Check if target is online
+        const targetOnline = dcp.isUserOnline(target);
+        if (!targetOnline) {
+            return res.status(404).json({ success: false, error: "Target user is offline" });
+        }
+
+        // Check if user is already in a call
+        const userInCall = dcp.isUserInCall(req.user);
+        if (userInCall) {
+            return res.status(400).json({ success: false, error: "You are already in a call" });
+        }
+
+        // Get DCP call info (this will initiate the call via WebSocket)
+        // Note: Actual call initiation happens via WebSocket, this endpoint just validates
+        return res.json({ 
+            success: true, 
+            message: "Use WebSocket connection for DCP calls",
+            protocol: "dcp",
+            supported: true
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: "server error" });
+    }
+});
+
+app.get("/api/dcp/call/:callId", require2FAMiddleware, async (req, res) => {
+    try {
+        const callId = req.params.callId;
+        const callInfo = dcp.getCallInfo(callId);
+        
+        if (!callInfo) {
+            return res.status(404).json({ success: false, error: "Call not found" });
+        }
+
+        if (!callInfo.participants.includes(req.user)) {
+            return res.status(403).json({ success: false, error: "Not authorized to view this call" });
+        }
+
+        res.json({
+            success: true,
+            call: {
+                id: callInfo.id,
+                caller: callInfo.caller,
+                target: callInfo.target,
+                channel: callInfo.channel,
+                type: callInfo.type,
+                status: callInfo.status,
+                participants: callInfo.participants,
+                createdAt: callInfo.createdAt,
+                lastActivity: callInfo.lastActivity,
+                duration: Date.now() - callInfo.createdAt
+            }
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: "server error" });
+    }
+});
+
+app.get("/api/dcp/user/calls", require2FAMiddleware, async (req, res) => {
+    try {
+        const userCalls = dcp.getUserCalls(req.user);
+        res.json({
+            success: true,
+            calls: userCalls.map(call => ({
+                id: call.id,
+                caller: call.caller,
+                target: call.target,
+                channel: call.channel,
+                type: call.type,
+                status: call.status,
+                participants: call.participants,
+                createdAt: call.createdAt,
+                duration: Date.now() - call.createdAt
+            }))
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: "server error" });
+    }
+});
+
+app.post("/api/dcp/end/:callId", require2FAMiddleware, async (req, res) => {
+    try {
+        const callId = req.params.callId;
+        const callInfo = dcp.getCallInfo(callId);
+        
+        if (!callInfo) {
+            return res.status(404).json({ success: false, error: "Call not found" });
+        }
+
+        if (!callInfo.participants.includes(req.user)) {
+            return res.status(403).json({ success: false, error: "Not a participant in this call" });
+        }
+
+        // This will trigger call end via WebSocket
+        return res.json({
+            success: true,
+            message: "Use WebSocket to end call",
+            callId
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: "server error" });
+    }
+});
+
+app.get("/api/dcp/stats", require2FAMiddleware, async (req, res) => {
+    try {
+        const stats = {
+            activeCalls: dcp.activeCalls.size,
+            connectedUsers: dcp.userConnections.size,
+            protocol: "DCP v1.0",
+            features: ["audio", "video", "keep-alive", "session-management"]
+        };
+        
+        res.json({ success: true, stats });
+    } catch (error) {
+        res.status(500).json({ success: false, error: "server error" });
+    }
+});
+
 app.get("/api/ping", (req, res) => {
     res.json({ success: true, message: "pong" });
 });
@@ -1231,21 +1373,30 @@ app.post("/api/upload/voice/:voiceId", require2FAMiddleware, multer().single('vo
 });
 
 app.get("/api/download/:filename", (req, res) => {
-    const filename = req.params.filename;
-    const filePath = path.join(config.uploads.dir, filename);
+  const filename = req.params.filename;
+  const filePath = path.join(config.uploads.dir, filename);
 
-    if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
-        return res.status(400).json({ error: "invalid filename" });
-    }
+  if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
+    return res.status(400).json({ error: "invalid filename" });
+  }
 
-    if (fs.existsSync(filePath)) {
-        const originalName = storage.getOriginalFileName(filename);
-        
-        res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(originalName)}"`);
-        res.download(filePath, originalName);
-    } else {
-        res.status(404).json({ success: false, error: "file not found" });
-    }
+  if (fs.existsSync(filePath)) {
+    const extension = path.extname(filename).toLowerCase();
+    let mimeType = 'application/octet-stream';
+    
+    if (extension === '.ogg') mimeType = 'audio/ogg';
+    else if (extension === '.m4a' || extension === '.mp4') mimeType = 'audio/mp4';
+    else if (extension === '.mp3') mimeType = 'audio/mpeg';
+    else if (extension === '.wav') mimeType = 'audio/wav';
+    
+    const originalName = storage.getOriginalFileName(filename);
+    
+    res.setHeader('Content-Type', mimeType);
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(originalName)}"`);
+    res.sendFile(path.resolve(filePath));
+  } else {
+    res.status(404).json({ success: false, error: "file not found" });
+  }
 });
 
 app.get("/api/events", authMiddleware, async (req, res) => {
@@ -1265,8 +1416,56 @@ app.get("/api/events", authMiddleware, async (req, res) => {
     res.write(`data: ${JSON.stringify({ type: "connected", clientId: client.id })}\n\n`);
 });
 
+// WebSocket server setup
 const wss = new WebSocketServer({ noServer: true });
 
+// Initialize DCP Protocol
+const dcp = new DCPProtocol(wss, {
+    keepAliveInterval: 30000,
+    sessionTimeout: 300000,
+    maxParticipants: 10
+});
+
+// DCP event handlers
+dcp.on('call_ended', (data) => {
+    console.log(`DCP Call ended: ${data.callId}, reason: ${data.reason}`);
+    
+    // Send notification to participants
+    const callInfo = dcp.getCallInfo(data.callId);
+    if (callInfo) {
+        callInfo.participants.forEach(participant => {
+            sseClients.forEach(client => {
+                if (client.user === participant) {
+                    client.res.write(`data: ${JSON.stringify({
+                        type: "call_ended",
+                        callId: data.callId,
+                        reason: data.reason,
+                        endedBy: data.endedBy,
+                        timestamp: Date.now()
+                    })}\n\n`);
+                }
+            });
+        });
+    }
+});
+
+dcp.on('call_incoming', (data) => {
+    // Send SSE notification for incoming call
+    sseClients.forEach(client => {
+        if (client.user === data.target) {
+            client.res.write(`data: ${JSON.stringify({
+                type: "dcp_call_incoming",
+                callId: data.callId,
+                caller: data.caller,
+                callType: data.callType,
+                channel: data.channel,
+                timestamp: Date.now()
+            })}\n\n`);
+        }
+    });
+});
+
+// WebSocket connection handler
 wss.on("connection", (ws, req) => {
     wsClients.add(ws);
     ws.isAlive = true;
@@ -1279,15 +1478,33 @@ wss.on("connection", (ws, req) => {
     ws.on("message", async data => {
         try {
             const payload = JSON.parse(data.toString());
+            
+            // Check if this is a DCP message
+            const dcpMessageTypes = [
+                'call_initiate', 'call_accept', 'call_reject', 'call_end',
+                'sdp_offer', 'sdp_answer', 'ice_candidate', 'keep_alive',
+                'call_status', 'mute_audio', 'mute_video'
+            ];
+            
+            if (payload.type && (payload.type.startsWith('dcp_') || dcpMessageTypes.includes(payload.type))) {
+                // DCP will handle these messages through its connection handler
+                // The message will be automatically processed by DCP's handleConnection method
+                return;
+            }
+            
+            // Handle other WebSocket messages as before
             const result = await actionHandlers[payload.action]?.(payload, ws.user);
             if (result) ws.send(JSON.stringify(result));
-        } catch (e) {}
+        } catch (e) {
+            console.error('WebSocket message error:', e);
+        }
     });
 });
 
 const server = app.listen(config.server.port, config.server.host, () => {
     const address = server.address();
     console.log(`Server started on ${address.address}:${address.port}`);
+    console.log(`DCP Protocol v1.0 initialized`);
 });
 
 server.on("upgrade", (req, socket, head) => {
@@ -1320,6 +1537,11 @@ server.on("upgrade", (req, socket, head) => {
     });
 });
 
+// Add DCP helper methods
+dcp.isUserOnline = (username) => {
+    return dcp.userConnections.has(username);
+};
+
 notificationService.wss = wss;
 notificationService.sse = { 
     clients: sseClients,
@@ -1335,6 +1557,7 @@ notificationService.sse = {
 botSystem.wss = wss;
 
 const interval = setInterval(() => {
+    // WebSocket keep-alive
     wsClients.forEach(ws => {
         if (!ws.isAlive) {
             ws.terminate();
@@ -1344,6 +1567,7 @@ const interval = setInterval(() => {
         ws.ping();
     });
 
+    // Clean up expired 2FA sessions
     const now = Date.now();
     for (const [username, session] of pending2FASessions.entries()) {
         if (now - session.createdAt > 5 * 60 * 1000) {
@@ -1351,19 +1575,29 @@ const interval = setInterval(() => {
         }
     }
 
+    // Clean up old voice messages
     if (now % 3600000 < 30000) {
         storage.cleanupOldVoiceMessages(24 * 60 * 60).catch(error => {});
     }
+
+    // DCP cleanup
+    dcp.cleanup();
 }, 30000);
 
 process.on("SIGTERM", () => {
     clearInterval(interval);
+    
+    // Cleanup DCP
+    dcp.cleanup();
+    
     if (proxyManager) {
         proxyManager.cleanup();
     }
+    
     server.close(() => {
         process.exit(0);
     });
 });
 
+export { dcp };
 export default app;

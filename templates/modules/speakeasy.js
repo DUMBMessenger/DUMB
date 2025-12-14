@@ -38,7 +38,7 @@ export class TOTP {
     }
 
     const timeBuffer = Buffer.alloc(8);
-    const timeCounter = Math.floor(time / 30);
+    let timeCounter = Math.floor(time / 30);
     
     for (let i = 7; i >= 0; i--) {
       timeBuffer[i] = timeCounter & 0xff;
