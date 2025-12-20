@@ -1,55 +1,182 @@
 import express from "express";
 import cors from "cors";
 import multer from "multer";
-import { WebSocketServer } from "./modules/websocket.js";
-import { Crypto as crypto } from "./modules/crypto.js";
-import { DCPProtocol } from "./modules/dcp.js";
 import fs from "fs";
 import path from "path";
 import config from "./config.js";
-import * as storage from "./storage/storage.js";
-import { TOTP as speakeasy } from "./modules/speakeasy.js";
-import { QRCode } from "./modules/qrcode.js";
-import { EmailService } from './modules/email.js';
-import { anse2_encrypt_wasm, anse2_decrypt_wasm, anse2_init_wasm } from "@akaruineko1/anse2";
-import { RedisService } from "./modules/redis.js";
-import { Logger } from './modules/logger.js';
-import { BotSystem } from './modules/bots.js';
-import { ModerationSystem } from './modules/moderation.js';
-import { Firewall } from './modules/firewall.js';
-import { RateLimiter } from './modules/limiter.js';
-import { ProxyManager } from './modules/proxy.js';
-import { NotificationManager } from './modules/notifications.js';
 import https from "https";
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { createModuleLoader } from "./modules/loader.js";
 
 const __filename = fileURLToPath((typeof document === "undefined") ? import.meta.url : "file://" + process.argv[1]);
 const __dirname = dirname(__filename);
 
-anse2_init_wasm();
+const moduleLoader = createModuleLoader(config);
+
+try {
+    await moduleLoader.init();
+} catch (error) {
+    console.error('Failed to initialize modules:', error);
+    process.exit(1);
+}
+
+const storage = moduleLoader.get('storage');
+if (!storage) {
+    console.error('Critical: Storage module not found!');
+    process.exit(1);
+}
+
+const crypto = moduleLoader.get('crypto');
+const speakeasy = moduleLoader.get('speakeasy');
+const QRCode = moduleLoader.get('QRCode');
+const WebSocketServer = moduleLoader.get('WebSocketServer');
+const DCPProtocol = moduleLoader.get('DCPProtocol');
+const EmailService = moduleLoader.get('email');
+const redisService = moduleLoader.get('redis'); // Исправлено: redisService вместо RedisService
+const logger = moduleLoader.get('logger') || console;
+
+// Получаем уже созданные экземпляры из ModuleLoader
+const botSystem = moduleLoader.get('bots');
+const moderationSystem = moduleLoader.get('moderation');
+const FirewallClass = moduleLoader.get('firewall');
+const RateLimiterClass = moduleLoader.get('rateLimiter');
+const ProxyManagerClass = moduleLoader.get('proxy');
+const NotificationManagerClass = moduleLoader.get('NotificationManager');
+
+// Отладочная информация
+console.log('\n=== MODULE LOADER DEBUG ===');
+console.log('Available modules:', Array.from(moduleLoader.modules.keys()));
+console.log('botSystem type:', typeof botSystem);
+console.log('moderationSystem type:', typeof moderationSystem);
+console.log('FirewallClass type:', typeof FirewallClass);
+console.log('RateLimiterClass type:', typeof RateLimiterClass);
+console.log('===========================\n');
+
+// Проверяем и инициализируем системы
+if (!botSystem) {
+    logger.warn('Server', 'Bot system not available');
+    botSystem = getFallbackBotSystem();
+} else {
+    logger.info('Server', 'Bot system loaded from ModuleLoader');
+}
+
+if (!moderationSystem) {
+    logger.warn('Server', 'Moderation system not available');
+    moderationSystem = getFallbackModerationSystem();
+} else {
+    logger.info('Server', 'Moderation system loaded from ModuleLoader');
+}
+
+let firewall = null;
+if (FirewallClass && typeof FirewallClass === 'function') {
+    try {
+        firewall = new FirewallClass(config.firewall || {});
+        logger.info('Server', 'Firewall initialized');
+    } catch (error) {
+        logger.error('Server', `Failed to initialize firewall: ${error.message}`);
+        firewall = getFallbackFirewall();
+    }
+} else {
+    logger.warn('Server', 'Firewall not available');
+    firewall = getFallbackFirewall();
+}
+
+let globalRateLimiter = null;
+if (RateLimiterClass && typeof RateLimiterClass === 'function') {
+    try {
+        globalRateLimiter = new RateLimiterClass(
+            config.rateLimit?.windowMs || 60000,
+            config.rateLimit?.max || 100
+        );
+        logger.info('Server', 'Rate limiter initialized');
+    } catch (error) {
+        logger.error('Server', `Failed to initialize rate limiter: ${error.message}`);
+        globalRateLimiter = getFallbackRateLimiter();
+    }
+} else {
+    logger.warn('Server', 'Rate limiter not available');
+    globalRateLimiter = getFallbackRateLimiter();
+}
+
+// Вспомогательные функции для fallback-объектов
+function getFallbackBotSystem() {
+    return { 
+        processMessageForBots: async () => {},
+        getUserBots: () => [],
+        registerBot: async () => { throw new Error('Bot system not available'); },
+        deleteBot: async () => { throw new Error('Bot system not available'); },
+        wss: null
+    };
+}
+
+function getFallbackModerationSystem() {
+    return {
+        checkBan: async () => ({ banned: false, reason: null }),
+        banUser: async () => ({ success: false }),
+        unbanUser: async () => ({ success: false }),
+        warnUser: async () => ({ success: false })
+    };
+}
+
+function getFallbackFirewall() {
+    return {
+        middleware: () => (req, res, next) => next()
+    };
+}
+
+function getFallbackRateLimiter() {
+    return {
+        middleware: () => (req, res, next) => next()
+    };
+}
+
+let notificationManager = null;
+let notificationService = null;
+if (NotificationManagerClass) {
+    notificationManager = new NotificationManagerClass(storage, null, null);
+    notificationService = notificationManager.getService();
+} else {
+    logger.warn('Server', 'Notifications not available');
+    notificationService = {
+        sendWelcomeNotification: async () => {},
+        onNewMessage: async () => {},
+        wss: null,
+        sse: null
+    };
+    notificationManager = {
+        middleware: () => (req, res, next) => next(),
+        setupRoutes: () => {},
+        getService: () => notificationService
+    };
+}
+
+let proxyManager = null;
+if (config.proxy?.enabled && ProxyManagerClass) {
+    try {
+        proxyManager = new ProxyManagerClass(config.proxy);
+        logger.info('Server', 'Proxy manager initialized');
+    } catch (error) {
+        logger.error('Server', `Failed to initialize proxy manager: ${error.message}`);
+        proxyManager = null;
+    }
+} else if (config.proxy?.enabled && !ProxyManagerClass) {
+    logger.warn('Server', 'Proxy enabled in config but proxy module not available');
+}
+
+if (config.security?.encryptionKey) {
+    try {
+        const { anse2_init_wasm, anse2_encrypt_wasm, anse2_decrypt_wasm } = await import("@akaruineko1/anse2");
+        anse2_init_wasm();
+        moduleLoader.modules.set('anse2', { anse2_encrypt_wasm, anse2_decrypt_wasm });
+    } catch (error) {
+        logger.error('Server', `WASM encryption not available: ${error.message}`);
+    }
+}
 
 const app = express();
 app.use(cors({ origin: config.cors.origin }));
 app.use(express.json({ limit: "1mb" }));
-
-const redisService = new RedisService(config.redis || { enabled: false });
-
-async function initializeRedis() {
-  await redisService.connect();
-}
-initializeRedis().catch(console.error);
-
-const emailService = new EmailService(config.email);
-const botSystem = new BotSystem(storage, null);
-const moderationSystem = new ModerationSystem(storage);
-const firewall = new Firewall(config.firewall || {});
-const globalRateLimiter = new RateLimiter(config.rateLimit.windowMs, config.rateLimit.max);
-
-let proxyManager = null;
-if (config.proxy && config.proxy.enabled) {
-    proxyManager = new ProxyManager(config.proxy);
-}
 
 if (config.features.uploads && !fs.existsSync(config.uploads.dir)) {
     fs.mkdirSync(config.uploads.dir, { recursive: true });
@@ -85,9 +212,6 @@ const sseClients = new Set();
 
 const genToken = () => crypto.randomBytes(32).toString("hex");
 const pending2FASessions = new Map();
-
-const notificationManager = new NotificationManager(storage, null, null);
-const notificationService = notificationManager.getService();
 
 const authMiddleware = async (req, res, next) => {
     const auth = req.headers.authorization?.split(" ") || [];
@@ -170,7 +294,7 @@ const checkNPMUpdates = async () => {
         };
 
         let request;
-        if (proxyManager) {
+        if (proxyManager && proxyManager.getProxyAgent) {
             const agent = proxyManager.getProxyAgent();
             if (agent) {
                 options.agent = agent;
@@ -415,7 +539,7 @@ const actionHandlers = {
             return { error: "channel exists" };
         }
 
-        if (config.redis?.enabled) {
+        if (config.redis?.enabled && redisService) {
             redisService.invalidateUserChannels(user).catch(err => {});
         }
 
@@ -427,7 +551,7 @@ const actionHandlers = {
             return { error: "not auth" };
         }
 
-        if (config.redis?.enabled) {
+        if (config.redis?.enabled && redisService) {
             try {
                 const cached = await redisService.getCachedUserChannels(user);
                 if (cached) {
@@ -438,7 +562,7 @@ const actionHandlers = {
 
         const channels = await storage.getChannels(user);
         
-        if (config.redis?.enabled) {
+        if (config.redis?.enabled && redisService) {
             redisService.cacheUserChannels(user, channels, 600).catch(err => {});
         }
 
@@ -468,7 +592,7 @@ const actionHandlers = {
             return { error: "invalid channel" };
         }
 
-        if (config.redis?.enabled) {
+        if (config.redis?.enabled && redisService) {
             redisService.invalidateUserChannels(user).catch(err => {});
         }
 
@@ -485,7 +609,7 @@ const actionHandlers = {
             return { error: "not a member" };
         }
 
-        if (config.redis?.enabled) {
+        if (config.redis?.enabled && redisService) {
             redisService.invalidateUserChannels(user).catch(err => {});
         }
 
@@ -524,7 +648,7 @@ const actionHandlers = {
             return { error: "update failed" };
         }
 
-        if (config.redis?.enabled) {
+        if (config.redis?.enabled && redisService) {
             redisService.invalidateChannel(name).catch(err => {});
             redisService.invalidateChannel(newName).catch(err => {});
         }
@@ -541,7 +665,7 @@ const actionHandlers = {
             return { error: "not a channel member" };
         }
 
-        if (config.redis?.enabled) {
+        if (config.redis?.enabled && redisService) {
             try {
                 const cached = await redisService.getCachedMessages(channel);
                 if (cached) {
@@ -572,7 +696,7 @@ const actionHandlers = {
             }
         }
         
-        if (config.redis?.enabled) {
+        if (config.redis?.enabled && redisService) {
             redisService.cacheMessages(channel, messages, 60).catch(err => {});
         }
 
@@ -625,11 +749,14 @@ const actionHandlers = {
 
         if (encrypt && config.security.encryptionKey && processedText) {
             try {
-                const encoder = new TextEncoder();
-                const inputBytes = encoder.encode(processedText);
-                const encryptedBytes = anse2_encrypt_wasm(inputBytes, config.security.encryptionKey);
-                processedText = Buffer.from(encryptedBytes).toString('base64');
-                isEncrypted = true;
+                const anse2 = moduleLoader.get('anse2');
+                if (anse2 && anse2.anse2_encrypt_wasm) {
+                    const encoder = new TextEncoder();
+                    const inputBytes = encoder.encode(processedText);
+                    const encryptedBytes = anse2.anse2_encrypt_wasm(inputBytes, config.security.encryptionKey);
+                    processedText = Buffer.from(encryptedBytes).toString('base64');
+                    isEncrypted = true;
+                }
             } catch (error) {
                 return { error: "encryption failed" };
             }
@@ -682,11 +809,14 @@ const actionHandlers = {
         
         if (isEncrypted && config.security.encryptionKey) {
             try {
-                const encryptedBytes = Buffer.from(saved.text, 'base64');
-                const decryptedBytes = anse2_decrypt_wasm(encryptedBytes, config.security.encryptionKey);
-                const decoder = new TextDecoder();
-                saved.text = decoder.decode(decryptedBytes);
-                saved.encrypted = false;
+                const anse2 = moduleLoader.get('anse2');
+                if (anse2 && anse2.anse2_decrypt_wasm) {
+                    const encryptedBytes = Buffer.from(saved.text, 'base64');
+                    const decryptedBytes = anse2.anse2_decrypt_wasm(encryptedBytes, config.security.encryptionKey);
+                    const decoder = new TextDecoder();
+                    saved.text = decoder.decode(decryptedBytes);
+                    saved.encrypted = false;
+                }
             } catch (error) {
                 saved.text = "[encrypted message]";
             }
@@ -698,7 +828,9 @@ const actionHandlers = {
             action: "new"
         };
 
-        wss.broadcast(messageToSend);
+        if (wss && wss.broadcast) {
+            wss.broadcast(messageToSend);
+        }
 
         sseClients.forEach(client => {
             if (client.user === user) {
@@ -706,10 +838,15 @@ const actionHandlers = {
             }
         });
 
-        await botSystem.processMessageForBots(saved);
-        await notificationService.onNewMessage(saved);
+        if (botSystem && botSystem.processMessageForBots) {
+            await botSystem.processMessageForBots(saved);
+        }
 
-        if (config.redis?.enabled) {
+        if (notificationService && notificationService.onNewMessage) {
+            await notificationService.onNewMessage(saved);
+        }
+
+        if (config.redis?.enabled && redisService) {
             redisService.invalidateChannel(channel).catch(err => {});
         }
 
@@ -752,7 +889,9 @@ const actionHandlers = {
             action: "new"
         };
 
-        wss.broadcast(messageToSend);
+        if (wss && wss.broadcast) {
+            wss.broadcast(messageToSend);
+        }
 
         sseClients.forEach(client => {
             if (client.user === user) {
@@ -760,10 +899,15 @@ const actionHandlers = {
             }
         });
 
-        await botSystem.processMessageForBots(saved);
-        await notificationService.onNewMessage(saved);
+        if (botSystem && botSystem.processMessageForBots) {
+            await botSystem.processMessageForBots(saved);
+        }
 
-        if (config.redis?.enabled) {
+        if (notificationService && notificationService.onNewMessage) {
+            await notificationService.onNewMessage(saved);
+        }
+
+        if (config.redis?.enabled && redisService) {
             redisService.invalidateChannel(channel).catch(err => {});
         }
 
@@ -851,7 +995,9 @@ const actionHandlers = {
             channel: channel
         };
 
-        wss.broadcast(offerData);
+        if (wss && wss.broadcast) {
+            wss.broadcast(offerData);
+        }
 
         return { success: true };
     },
@@ -869,7 +1015,9 @@ const actionHandlers = {
             answer: answer
         };
 
-        wss.broadcast(answerData);
+        if (wss && wss.broadcast) {
+            wss.broadcast(answerData);
+        }
 
         return { success: true };
     },
@@ -887,7 +1035,9 @@ const actionHandlers = {
             candidate: candidate
         };
 
-        wss.broadcast(candidateData);
+        if (wss && wss.broadcast) {
+            wss.broadcast(candidateData);
+        }
 
         return { success: true };
     },
@@ -935,7 +1085,9 @@ const actionHandlers = {
             from: user
         };
 
-        wss.broadcast(endCallData);
+        if (wss && wss.broadcast) {
+            wss.broadcast(endCallData);
+        }
 
         return { success: true };
     },
@@ -979,7 +1131,9 @@ const actionHandlers = {
         const resetToken = crypto.randomBytes(32).toString('hex');
         await storage.createPasswordReset(user, resetToken);
 
-        await emailService.sendPasswordResetEmail(email, resetToken);
+        if (EmailService && EmailService.sendPasswordResetEmail) {
+            await EmailService.sendPasswordResetEmail(email, resetToken);
+        }
 
         return { success: true, message: "If email exists, reset instructions sent" };
     },
@@ -1010,7 +1164,10 @@ const actionHandlers = {
         const verificationCode = Math.random().toString().substring(2, 8);
         await storage.createEmailVerification(user, email, verificationCode);
 
-        const sent = await emailService.sendVerificationEmail(email, verificationCode);
+        let sent = false;
+        if (EmailService && EmailService.sendVerificationEmail) {
+            sent = await EmailService.sendVerificationEmail(email, verificationCode);
+        }
         
         if (!sent) {
             return { error: "failed to send email" };
@@ -1111,13 +1268,19 @@ const createEndpoint = (method, path, middleware, action, paramMap = null) => {
             const result = await actionHandlers[action](params, req.user);
             res.json(result.success ? result : { success: false, ...result });
         } catch (e) {
+            logger.error('Endpoint', `Error in ${path}: ${e.message}`);
             res.status(500).json({ success: false, error: "server error" });
         }
     });
 };
 
-app.use(notificationManager.middleware());
-notificationManager.setupRoutes(app);
+if (notificationManager && notificationManager.middleware) {
+    app.use(notificationManager.middleware());
+}
+
+if (notificationManager && notificationManager.setupRoutes) {
+    notificationManager.setupRoutes(app);
+}
 
 app.get("/api/user/:username/avatar", async (req, res) => {
     try {
@@ -1146,12 +1309,18 @@ app.get("/api/user/:username/avatar", async (req, res) => {
 
         res.sendFile(user.avatar, { root: config.uploads.dir });
     } catch (error) {
+        logger.error('AvatarRoute', `Error serving avatar: ${error.message}`);
         res.status(500).json({ success: false, error: "server error" });
     }
 });
 
-app.use(globalRateLimiter.middleware());
-app.use(firewall.middleware());
+if (globalRateLimiter && globalRateLimiter.middleware) {
+    app.use(globalRateLimiter.middleware());
+}
+
+if (firewall && firewall.middleware) {
+    app.use(firewall.middleware());
+}
 
 createEndpoint('post', '/api/register', [], 'register');
 createEndpoint('post', '/api/login', [], 'login');
@@ -1196,7 +1365,6 @@ createEndpoint('post', '/api/bots/create', require2FAMiddleware, 'createBot');
 createEndpoint('get', '/api/bots/:username', require2FAMiddleware, 'getBot');
 createEndpoint('delete', '/api/bots/:username', require2FAMiddleware, 'deleteBot');
 
-// DCP Protocol API endpoints
 app.post("/api/dcp/initiate", require2FAMiddleware, async (req, res) => {
     try {
         const { target, channel, callType = 'audio', metadata = {} } = req.body;
@@ -1205,20 +1373,16 @@ app.post("/api/dcp/initiate", require2FAMiddleware, async (req, res) => {
             return res.status(400).json({ success: false, error: "Target user required" });
         }
 
-        // Check if target is online
-        const targetOnline = dcp.isUserOnline(target);
+        const targetOnline = dcp && dcp.isUserOnline ? dcp.isUserOnline(target) : false;
         if (!targetOnline) {
             return res.status(404).json({ success: false, error: "Target user is offline" });
         }
 
-        // Check if user is already in a call
-        const userInCall = dcp.isUserInCall(req.user);
+        const userInCall = dcp && dcp.isUserInCall ? dcp.isUserInCall(req.user) : false;
         if (userInCall) {
             return res.status(400).json({ success: false, error: "You are already in a call" });
         }
 
-        // Get DCP call info (this will initiate the call via WebSocket)
-        // Note: Actual call initiation happens via WebSocket, this endpoint just validates
         return res.json({ 
             success: true, 
             message: "Use WebSocket connection for DCP calls",
@@ -1226,6 +1390,7 @@ app.post("/api/dcp/initiate", require2FAMiddleware, async (req, res) => {
             supported: true
         });
     } catch (error) {
+        logger.error('DCP', `Initiate call error: ${error.message}`);
         res.status(500).json({ success: false, error: "server error" });
     }
 });
@@ -1233,7 +1398,7 @@ app.post("/api/dcp/initiate", require2FAMiddleware, async (req, res) => {
 app.get("/api/dcp/call/:callId", require2FAMiddleware, async (req, res) => {
     try {
         const callId = req.params.callId;
-        const callInfo = dcp.getCallInfo(callId);
+        const callInfo = dcp && dcp.getCallInfo ? dcp.getCallInfo(callId) : null;
         
         if (!callInfo) {
             return res.status(404).json({ success: false, error: "Call not found" });
@@ -1259,13 +1424,14 @@ app.get("/api/dcp/call/:callId", require2FAMiddleware, async (req, res) => {
             }
         });
     } catch (error) {
+        logger.error('DCP', `Get call info error: ${error.message}`);
         res.status(500).json({ success: false, error: "server error" });
     }
 });
 
 app.get("/api/dcp/user/calls", require2FAMiddleware, async (req, res) => {
     try {
-        const userCalls = dcp.getUserCalls(req.user);
+        const userCalls = dcp && dcp.getUserCalls ? dcp.getUserCalls(req.user) : [];
         res.json({
             success: true,
             calls: userCalls.map(call => ({
@@ -1281,6 +1447,7 @@ app.get("/api/dcp/user/calls", require2FAMiddleware, async (req, res) => {
             }))
         });
     } catch (error) {
+        logger.error('DCP', `Get user calls error: ${error.message}`);
         res.status(500).json({ success: false, error: "server error" });
     }
 });
@@ -1288,7 +1455,7 @@ app.get("/api/dcp/user/calls", require2FAMiddleware, async (req, res) => {
 app.post("/api/dcp/end/:callId", require2FAMiddleware, async (req, res) => {
     try {
         const callId = req.params.callId;
-        const callInfo = dcp.getCallInfo(callId);
+        const callInfo = dcp && dcp.getCallInfo ? dcp.getCallInfo(callId) : null;
         
         if (!callInfo) {
             return res.status(404).json({ success: false, error: "Call not found" });
@@ -1298,13 +1465,13 @@ app.post("/api/dcp/end/:callId", require2FAMiddleware, async (req, res) => {
             return res.status(403).json({ success: false, error: "Not a participant in this call" });
         }
 
-        // This will trigger call end via WebSocket
         return res.json({
             success: true,
             message: "Use WebSocket to end call",
             callId
         });
     } catch (error) {
+        logger.error('DCP', `End call error: ${error.message}`);
         res.status(500).json({ success: false, error: "server error" });
     }
 });
@@ -1312,27 +1479,32 @@ app.post("/api/dcp/end/:callId", require2FAMiddleware, async (req, res) => {
 app.get("/api/dcp/stats", require2FAMiddleware, async (req, res) => {
     try {
         const stats = {
-            activeCalls: dcp.activeCalls.size,
-            connectedUsers: dcp.userConnections.size,
+            activeCalls: dcp && dcp.activeCalls ? dcp.activeCalls.size : 0,
+            connectedUsers: dcp && dcp.userConnections ? dcp.userConnections.size : 0,
             protocol: "DCP v1.0",
             features: ["audio", "video", "keep-alive", "session-management"]
         };
         
         res.json({ success: true, stats });
     } catch (error) {
+        logger.error('DCP', `Get stats error: ${error.message}`);
         res.status(500).json({ success: false, error: "server error" });
     }
 });
 
 app.get("/api/ping", (req, res) => {
-    res.json({ success: true, message: "pong" });
+    res.json({ success: true, message: "pong", timestamp: Date.now() });
 });
 
 app.get("/api/admin/redis-stats", require2FAMiddleware, async (req, res) => {
     try {
+        if (!redisService || !redisService.getStats) {
+            return res.status(503).json({ success: false, error: "Redis service not available" });
+        }
         const stats = await redisService.getStats();
         res.json({ success: true, stats });
     } catch (error) {
+        logger.error('Redis', `Get stats error: ${error.message}`);
         res.status(500).json({ success: false, error: "Failed to get Redis stats" });
     }
 });
@@ -1342,6 +1514,7 @@ app.post("/api/upload/avatar", require2FAMiddleware, avatarUpload.single("avatar
         const result = await actionHandlers.uploadAvatar(req, req.user);
         res.json(result);
     } catch (error) {
+        logger.error('Upload', `Avatar upload error: ${error.message}`);
         res.status(500).json({ success: false, error: "upload failed" });
     }
 });
@@ -1351,6 +1524,7 @@ app.post("/api/upload/file", require2FAMiddleware, fileUpload.single("file"), as
         const result = await actionHandlers.uploadFile(req, req.user);
         res.json(result);
     } catch (error) {
+        logger.error('Upload', `File upload error: ${error.message}`);
         res.status(500).json({ success: false, error: "upload failed" });
     }
 });
@@ -1368,35 +1542,36 @@ app.post("/api/upload/voice/:voiceId", require2FAMiddleware, multer().single('vo
         
         res.json({ success: true, voiceId });
     } catch (error) {
+        logger.error('Upload', `Voice upload error: ${error.message}`);
         res.status(500).json({ success: false, error: "upload failed" });
     }
 });
 
 app.get("/api/download/:filename", (req, res) => {
-  const filename = req.params.filename;
-  const filePath = path.join(config.uploads.dir, filename);
+    const filename = req.params.filename;
+    const filePath = path.join(config.uploads.dir, filename);
 
-  if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
-    return res.status(400).json({ error: "invalid filename" });
-  }
+    if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
+        return res.status(400).json({ error: "invalid filename" });
+    }
 
-  if (fs.existsSync(filePath)) {
-    const extension = path.extname(filename).toLowerCase();
-    let mimeType = 'application/octet-stream';
-    
-    if (extension === '.ogg') mimeType = 'audio/ogg';
-    else if (extension === '.m4a' || extension === '.mp4') mimeType = 'audio/mp4';
-    else if (extension === '.mp3') mimeType = 'audio/mpeg';
-    else if (extension === '.wav') mimeType = 'audio/wav';
-    
-    const originalName = storage.getOriginalFileName(filename);
-    
-    res.setHeader('Content-Type', mimeType);
-    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(originalName)}"`);
-    res.sendFile(path.resolve(filePath));
-  } else {
-    res.status(404).json({ success: false, error: "file not found" });
-  }
+    if (fs.existsSync(filePath)) {
+        const extension = path.extname(filename).toLowerCase();
+        let mimeType = 'application/octet-stream';
+        
+        if (extension === '.ogg') mimeType = 'audio/ogg';
+        else if (extension === '.m4a' || extension === '.mp4') mimeType = 'audio/mp4';
+        else if (extension === '.mp3') mimeType = 'audio/mpeg';
+        else if (extension === '.wav') mimeType = 'audio/wav';
+        
+        const originalName = storage.getOriginalFileName ? storage.getOriginalFileName(filename) : filename;
+        
+        res.setHeader('Content-Type', mimeType);
+        res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(originalName)}"`);
+        res.sendFile(path.resolve(filePath));
+    } else {
+        res.status(404).json({ success: false, error: "file not found" });
+    }
 });
 
 app.get("/api/events", authMiddleware, async (req, res) => {
@@ -1411,153 +1586,206 @@ app.get("/api/events", authMiddleware, async (req, res) => {
 
     req.on("close", () => {
         sseClients.delete(client);
+        logger.debug('SSE', `Client disconnected: ${client.id}`);
     });
 
     res.write(`data: ${JSON.stringify({ type: "connected", clientId: client.id })}\n\n`);
+    logger.debug('SSE', `New SSE client connected: ${client.id} (user: ${req.user})`);
 });
 
-// WebSocket server setup
-const wss = new WebSocketServer({ noServer: true });
-
-// Initialize DCP Protocol
-const dcp = new DCPProtocol(wss, {
-    keepAliveInterval: 30000,
-    sessionTimeout: 300000,
-    maxParticipants: 10
-});
-
-// DCP event handlers
-dcp.on('call_ended', (data) => {
-    console.log(`DCP Call ended: ${data.callId}, reason: ${data.reason}`);
-    
-    // Send notification to participants
-    const callInfo = dcp.getCallInfo(data.callId);
-    if (callInfo) {
-        callInfo.participants.forEach(participant => {
-            sseClients.forEach(client => {
-                if (client.user === participant) {
-                    client.res.write(`data: ${JSON.stringify({
-                        type: "call_ended",
-                        callId: data.callId,
-                        reason: data.reason,
-                        endedBy: data.endedBy,
-                        timestamp: Date.now()
-                    })}\n\n`);
-                }
-            });
+app.get("/api/dcp/online/:username", require2FAMiddleware, async (req, res) => {
+    try {
+        const target = req.params.username;
+        const isOnline = dcp && dcp.isUserOnline ? dcp.isUserOnline(target) : false;
+        
+        res.json({
+            success: true,
+            username: target,
+            isOnline: isOnline,
+            lastSeen: isOnline ? 'online' : 'offline',
+            timestamp: Date.now()
         });
+    } catch (error) {
+        logger.error('DCP', `Online status error: ${error.message}`);
+        res.status(500).json({ success: false, error: "server error" });
     }
 });
 
-dcp.on('call_incoming', (data) => {
-    // Send SSE notification for incoming call
-    sseClients.forEach(client => {
-        if (client.user === data.target) {
-            client.res.write(`data: ${JSON.stringify({
-                type: "dcp_call_incoming",
-                callId: data.callId,
-                caller: data.caller,
-                callType: data.callType,
-                channel: data.channel,
-                timestamp: Date.now()
-            })}\n\n`);
+let wss = null;
+if (WebSocketServer) {
+    wss = new WebSocketServer({ noServer: true });
+} else {
+    logger.warn('Server', 'WebSocketServer not available');
+    wss = {
+        broadcast: () => {},
+        handleUpgrade: () => {},
+        on: () => {}
+    };
+}
+
+let dcp = null;
+if (DCPProtocol && wss) {
+    dcp = new DCPProtocol(wss, {
+        keepAliveInterval: 30000,
+        sessionTimeout: 300000,
+        maxParticipants: 10
+    });
+} else {
+    logger.warn('Server', 'DCP Protocol not available');
+    dcp = {
+        isUserOnline: () => false,
+        isUserInCall: () => false,
+        getCallInfo: () => null,
+        getUserCalls: () => [],
+        activeCalls: { size: 0 },
+        userConnections: { size: 0 },
+        cleanup: () => {},
+        on: () => {}
+    };
+}
+
+if (dcp && dcp.on) {
+    dcp.on('call_ended', (data) => {
+        logger.info('DCP', `Call ended: ${data.callId}, reason: ${data.reason}`);
+        
+        const callInfo = dcp.getCallInfo ? dcp.getCallInfo(data.callId) : null;
+        if (callInfo) {
+            callInfo.participants.forEach(participant => {
+                sseClients.forEach(client => {
+                    if (client.user === participant) {
+                        client.res.write(`data: ${JSON.stringify({
+                            type: "call_ended",
+                            callId: data.callId,
+                            reason: data.reason,
+                            endedBy: data.endedBy,
+                            timestamp: Date.now()
+                        })}\n\n`);
+                    }
+                });
+            });
         }
     });
-});
 
-// WebSocket connection handler
-wss.on("connection", (ws, req) => {
-    wsClients.add(ws);
-    ws.isAlive = true;
-
-    ws.on("pong", () => { ws.isAlive = true; });
-    ws.on("close", () => {
-        wsClients.delete(ws);
-    });
-
-    ws.on("message", async data => {
-        try {
-            const payload = JSON.parse(data.toString());
-            
-            // Check if this is a DCP message
-            const dcpMessageTypes = [
-                'call_initiate', 'call_accept', 'call_reject', 'call_end',
-                'sdp_offer', 'sdp_answer', 'ice_candidate', 'keep_alive',
-                'call_status', 'mute_audio', 'mute_video'
-            ];
-            
-            if (payload.type && (payload.type.startsWith('dcp_') || dcpMessageTypes.includes(payload.type))) {
-                // DCP will handle these messages through its connection handler
-                // The message will be automatically processed by DCP's handleConnection method
-                return;
+    dcp.on('call_incoming', (data) => {
+        logger.info('DCP', `Incoming call to ${data.target} from ${data.caller}`);
+        
+        sseClients.forEach(client => {
+            if (client.user === data.target) {
+                client.res.write(`data: ${JSON.stringify({
+                    type: "dcp_call_incoming",
+                    callId: data.callId,
+                    caller: data.caller,
+                    callType: data.callType,
+                    channel: data.channel,
+                    timestamp: Date.now()
+                })}\n\n`);
             }
-            
-            // Handle other WebSocket messages as before
-            const result = await actionHandlers[payload.action]?.(payload, ws.user);
-            if (result) ws.send(JSON.stringify(result));
-        } catch (e) {
-            console.error('WebSocket message error:', e);
-        }
+        });
     });
-});
+}
+
+if (wss && wss.on) {
+    wss.on("connection", (ws, req) => {
+        wsClients.add(ws);
+        ws.isAlive = true;
+
+        ws.on("pong", () => { ws.isAlive = true; });
+        ws.on("close", () => {
+            wsClients.delete(ws);
+            logger.debug('WebSocket', `Client disconnected: ${ws.user}`);
+        });
+
+        ws.on("message", async data => {
+            try {
+                const payload = JSON.parse(data.toString());
+                
+                const dcpMessageTypes = [
+                    'call_initiate', 'call_accept', 'call_reject', 'call_end',
+                    'sdp_offer', 'sdp_answer', 'ice_candidate', 'keep_alive',
+                    'call_status', 'mute_audio', 'mute_video'
+                ];
+                
+                if (payload.type && (payload.type.startsWith('dcp_') || dcpMessageTypes.includes(payload.type))) {
+                    return;
+                }
+                
+                const result = await actionHandlers[payload.action]?.(payload, ws.user);
+                if (result) ws.send(JSON.stringify(result));
+            } catch (e) {
+                logger.error('WebSocket', `Message error: ${e.message}`);
+            }
+        });
+        
+        logger.debug('WebSocket', `New WebSocket connection: ${ws.user}`);
+    });
+}
 
 const server = app.listen(config.server.port, config.server.host, () => {
     const address = server.address();
-    console.log(`Server started on ${address.address}:${address.port}`);
-    console.log(`DCP Protocol v1.0 initialized`);
+    logger.info('Server', `Started on ${address.address}:${address.port}`);
+    logger.info('Server', `ModuleLoader initialized`);
 });
 
-server.on("upgrade", (req, socket, head) => {
-    let token;
-    const auth = req.headers.authorization?.split(" ") || [];
-    if (auth.length === 2 && auth[0] === "Bearer") {
-        token = auth[1];
-    } else {
-        const url = new URL(req.url, `http://${req.headers.host}`);
-        token = url.searchParams.get('token');
-    }
+if (server && wss && wss.handleUpgrade) {
+    server.on("upgrade", (req, socket, head) => {
+        let token;
+        const auth = req.headers.authorization?.split(" ") || [];
+        if (auth.length === 2 && auth[0] === "Bearer") {
+            token = auth[1];
+        } else {
+            const url = new URL(req.url, `http://${req.headers.host}`);
+            token = url.searchParams.get('token');
+        }
 
-    if (!token) {
-        socket.destroy();
-        return;
-    }
-
-    storage.validateToken(token).then(user => {
-        if (!user) {
+        if (!token) {
             socket.destroy();
             return;
         }
 
-        wss.handleUpgrade(req, socket, head, ws => {
-            ws.user = user;
-            wss.emit("connection", ws, req);
-        });
-    }).catch(err => {
-        socket.destroy();
-    });
-});
-
-// Add DCP helper methods
-dcp.isUserOnline = (username) => {
-    return dcp.userConnections.has(username);
-};
-
-notificationService.wss = wss;
-notificationService.sse = { 
-    clients: sseClients,
-    sendToUser: (userId, data) => {
-        sseClients.forEach(client => {
-            if (client.user === userId) {
-                client.res.write(`data: ${JSON.stringify(data)}\n\n`);
+        storage.validateToken(token).then(user => {
+            if (!user) {
+                socket.destroy();
+                return;
             }
-        });
-    }
-};
 
-botSystem.wss = wss;
+            wss.handleUpgrade(req, socket, head, ws => {
+                ws.user = user;
+                if (wss.emit) {
+                    wss.emit("connection", ws, req);
+                }
+            });
+        }).catch(err => {
+            logger.error('WebSocket', `Upgrade error: ${err.message}`);
+            socket.destroy();
+        });
+    });
+}
+
+if (dcp) {
+    dcp.isUserOnline = (username) => {
+        return dcp.userConnections ? dcp.userConnections.has(username) : false;
+    };
+}
+
+if (notificationService) {
+    notificationService.wss = wss;
+    notificationService.sse = { 
+        clients: sseClients,
+        sendToUser: (userId, data) => {
+            sseClients.forEach(client => {
+                if (client.user === userId) {
+                    client.res.write(`data: ${JSON.stringify(data)}\n\n`);
+                }
+            });
+        }
+    };
+}
+
+if (botSystem) {
+    botSystem.wss = wss;
+}
 
 const interval = setInterval(() => {
-    // WebSocket keep-alive
     wsClients.forEach(ws => {
         if (!ws.isAlive) {
             ws.terminate();
@@ -1567,37 +1795,48 @@ const interval = setInterval(() => {
         ws.ping();
     });
 
-    // Clean up expired 2FA sessions
     const now = Date.now();
     for (const [username, session] of pending2FASessions.entries()) {
         if (now - session.createdAt > 5 * 60 * 1000) {
             pending2FASessions.delete(username);
+            logger.debug('2FA', `Expired session cleaned up for user: ${username}`);
         }
     }
 
-    // Clean up old voice messages
     if (now % 3600000 < 30000) {
-        storage.cleanupOldVoiceMessages(24 * 60 * 60).catch(error => {});
+        if (storage.cleanupOldVoiceMessages) {
+            storage.cleanupOldVoiceMessages(24 * 60 * 60).catch(error => {
+                logger.error('Maintenance', `Voice message cleanup error: ${error.message}`);
+            });
+        }
     }
 
-    // DCP cleanup
-    dcp.cleanup();
+    if (dcp && dcp.cleanup) {
+        dcp.cleanup();
+    }
 }, 30000);
 
-process.on("SIGTERM", () => {
+process.on("SIGTERM", async () => {
+    logger.info('Server', 'Received SIGTERM, shutting down gracefully...');
     clearInterval(interval);
     
-    // Cleanup DCP
-    dcp.cleanup();
+    if (dcp && dcp.cleanup) {
+        dcp.cleanup();
+    }
     
-    if (proxyManager) {
+    if (proxyManager && proxyManager.cleanup) {
         proxyManager.cleanup();
     }
     
+    if (moduleLoader && moduleLoader.cleanup) {
+        await moduleLoader.cleanup();
+    }
+    
     server.close(() => {
+        logger.info('Server', 'Server shutdown complete');
         process.exit(0);
     });
 });
 
-export { dcp };
+export { dcp, moduleLoader, wss, sseClients, wsClients };
 export default app;

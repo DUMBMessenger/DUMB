@@ -1,19 +1,28 @@
 export class Logger {
-  static info(message, meta = {}) {
-    this.log('INFO', message, meta);
+  constructor(config = {}) {
+    this.config = config;
   }
 
-  static warn(message, meta = {}) {
-    this.log('WARN', message, meta);
+  info(module, message, meta = {}) {
+    this.log('INFO', module, message, meta);
   }
 
-  static error(message, meta = {}) {
-    this.log('ERROR', message, meta);
+  warn(module, message, meta = {}) {
+    this.log('WARN', module, message, meta);
   }
 
-  static log(level, message, meta = {}) {
+  error(module, message, meta = {}) {
+    this.log('ERROR', module, message, meta);
+  }
+
+  debug(module, message, meta = {}) {
+    this.log('DEBUG', module, message, meta);
+  }
+
+  log(level, module, message, meta = {}) {
     const logEntry = {
       level,
+      module,
       message,
       timestamp: new Date().toISOString(),
       ...meta

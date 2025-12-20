@@ -1,90 +1,264 @@
-import { randomBytes, createHash, pbkdf2Sync, createCipheriv, createDecipheriv } from 'crypto';
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
 
-export class Crypto {
+const rustCrypto = require('./crypto.node');
+
+class Crypto {
   static randomBytes(size) {
-    return randomBytes(size);
+    return rustCrypto.randomBytes(size);
   }
 
   static createHash(algorithm) {
-    return createHash(algorithm);
+    if (algorithm !== 'sha256' && algorithm !== 'sha1') {
+      throw new Error(`Unsupported hash algorithm: ${algorithm}. Use 'sha256' or 'sha1'`);
+    }
+    
+    let currentData = Buffer.alloc(0);
+    
+    return {
+      update: (data) => {
+        if (typeof data === 'string') {
+          data = Buffer.from(data);
+        }
+        currentData = Buffer.concat([currentData, data]);
+        return this;
+      },
+      digest: (encoding = 'hex') => {
+        const hash = rustCrypto.createHash(currentData);
+        currentData = Buffer.alloc(0);
+        
+        if (encoding === 'hex') {
+          return hash.toString('hex');
+        } else if (encoding === 'base64') {
+          return hash.toString('base64');
+        } else if (encoding === 'buffer') {
+          return hash;
+        }
+        return hash;
+      }
+    };
   }
 
   static pbkdf2Sync(password, salt, iterations, keylen, digest) {
-    return pbkdf2Sync(password, salt, iterations, keylen, digest);
+    if (digest !== 'sha256') {
+      throw new Error(`Unsupported digest: ${digest}. Use 'sha256'`);
+    }
+    
+    const key = rustCrypto.pbkdf2(
+      Buffer.from(password),
+      Buffer.from(salt),
+      iterations
+    );
+    
+    if (keylen && keylen < key.length) {
+      return key.slice(0, keylen);
+    }
+    return key;
+  }
+
+  static createCipheriv(algorithm, key, iv) {
+    if (algorithm !== 'aes-256-cbc') {
+      throw new Error(`Unsupported cipher: ${algorithm}. Use 'aes-256-cbc'`);
+    }
+    
+    let finalKey = Buffer.from(key);
+    if (finalKey.length !== 32) {
+      const derived = rustCrypto.deriveKey(finalKey, null, rustCrypto.getDefaultIterations());
+      finalKey = derived.key;
+    }
+    
+    let finalIv = iv;
+    if (!finalIv) {
+      finalIv = rustCrypto.randomBytes(16);
+    }
+    
+    let dataToEncrypt = Buffer.alloc(0);
+    
+    return {
+      iv: finalIv,
+      update: (data, inputEncoding, outputEncoding) => {
+        if (typeof data === 'string') {
+          data = Buffer.from(data, inputEncoding || 'utf8');
+        }
+        dataToEncrypt = Buffer.concat([dataToEncrypt, data]);
+        return Buffer.alloc(0);
+      },
+      final: (outputEncoding) => {
+        const result = rustCrypto.encryptWithKey(
+          dataToEncrypt,
+          finalKey,
+          finalIv
+        );
+        dataToEncrypt = Buffer.alloc(0);
+        
+        if (outputEncoding === 'hex') {
+          return result.encrypted.toString('hex');
+        } else if (outputEncoding === 'base64') {
+          return result.encrypted.toString('base64');
+        }
+        return result.encrypted;
+      }
+    };
+  }
+
+  static createDecipheriv(algorithm, key, iv) {
+    if (algorithm !== 'aes-256-cbc') {
+      throw new Error(`Unsupported cipher: ${algorithm}. Use 'aes-256-cbc'`);
+    }
+    
+    if (!iv || iv.length !== 16) {
+      throw new Error('IV must be 16 bytes');
+    }
+    
+    let finalKey = Buffer.from(key);
+    if (finalKey.length !== 32) {
+      const derived = rustCrypto.deriveKey(finalKey, null, rustCrypto.getDefaultIterations());
+      finalKey = derived.key;
+    }
+    
+    let dataToDecrypt = Buffer.alloc(0);
+    
+    return {
+      update: (data, inputEncoding, outputEncoding) => {
+        if (typeof data === 'string') {
+          data = Buffer.from(data, inputEncoding || 'utf8');
+        }
+        dataToDecrypt = Buffer.concat([dataToDecrypt, data]);
+        return Buffer.alloc(0);
+      },
+      final: (outputEncoding) => {
+        const result = rustCrypto.decryptWithKey(
+          dataToDecrypt,
+          finalKey,
+          iv
+        );
+        dataToDecrypt = Buffer.alloc(0);
+        
+        if (outputEncoding === 'utf8') {
+          return result.toString('utf8');
+        } else if (outputEncoding === 'hex') {
+          return result.toString('hex');
+        }
+        return result;
+      }
+    };
   }
 
   static createCipher(algorithm, key) {
-    const iv = randomBytes(16);
-    const cipher = createCipheriv('aes-256-cbc', this._deriveKey(key), iv);
+    const iv = rustCrypto.randomBytes(16);
+    const cipher = this.createCipheriv('aes-256-cbc', key, iv);
     cipher.iv = iv;
     return cipher;
   }
 
   static createDecipher(algorithm, key, iv) {
-    return createDecipheriv('aes-256-cbc', this._deriveKey(key), iv);
+    return this.createDecipheriv('aes-256-cbc', key, iv);
   }
 
   static createHmac(algorithm, key) {
+    if (algorithm !== 'sha256' && algorithm !== 'sha1') {
+      throw new Error(`Unsupported HMAC algorithm: ${algorithm}. Use 'sha256' or 'sha1'`);
+    }
+    
+    let dataToHash = Buffer.alloc(0);
+    
     return {
       update: (data) => {
-        this._hmacData = data;
+        if (typeof data === 'string') {
+          data = Buffer.from(data);
+        }
+        dataToHash = Buffer.concat([dataToHash, data]);
         return this;
       },
       digest: (encoding = 'hex') => {
-        const hmac = createHash(algorithm);
-        hmac.update(key);
-        hmac.update(this._hmacData);
-        return hmac.digest(encoding);
+        const hmac = rustCrypto.hmac(
+          Buffer.from(key),
+          dataToHash
+        );
+        dataToHash = Buffer.alloc(0);
+        
+        if (encoding === 'hex') {
+          return hmac.toString('hex');
+        } else if (encoding === 'base64') {
+          return hmac.toString('base64');
+        }
+        return hmac;
       }
     };
   }
 
   static _deriveKey(password) {
-    return pbkdf2Sync(password, 'salt', 100000, 32, 'sha256');
+    const result = rustCrypto.deriveKey(
+      Buffer.from(password),
+      null,
+      rustCrypto.getDefaultIterations()
+    );
+    return result.key;
   }
 
   static base32Encode(buffer) {
-    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
-    let bits = '';
-    let output = '';
-
-    for (let i = 0; i < buffer.length; i++) {
-      bits += buffer[i].toString(2).padStart(8, '0');
-    }
-
-    while (bits.length % 5 !== 0) {
-      bits += '0';
-    }
-
-    for (let i = 0; i < bits.length; i += 5) {
-      const chunk = bits.substr(i, 5);
-      output += alphabet[parseInt(chunk, 2)];
-    }
-
-    const padding = 8 - (output.length % 8);
-    if (padding !== 8) {
-      output += '='.repeat(padding);
-    }
-
-    return output;
+    return rustCrypto.base32Encode(Buffer.from(buffer));
   }
 
   static base32Decode(input) {
-    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
-    input = input.toUpperCase().replace(/=+$/, '');
-    
-    let bits = '';
-    for (let i = 0; i < input.length; i++) {
-      const index = alphabet.indexOf(input[i]);
-      if (index === -1) continue;
-      bits += index.toString(2).padStart(5, '0');
-    }
+    return rustCrypto.base32Decode(input);
+  }
 
-    const bytes = [];
-    for (let i = 0; i + 8 <= bits.length; i += 8) {
-      bytes.push(parseInt(bits.substr(i, 8), 2));
-    }
+  static encrypt(data, password, salt = null, iterations = null) {
+    const result = rustCrypto.encryptWithPassword(
+      Buffer.from(data),
+      Buffer.from(password),
+      salt ? Buffer.from(salt) : null,
+      iterations
+    );
+    return {
+      encrypted: result.encrypted,
+      iv: result.iv,
+      salt: result.salt
+    };
+  }
 
-    return Buffer.from(bytes);
+  static decrypt(encrypted, password, iv, salt, iterations = null) {
+    return rustCrypto.decryptWithPassword(
+      Buffer.from(encrypted),
+      Buffer.from(password),
+      Buffer.from(iv),
+      Buffer.from(salt),
+      iterations
+    );
+  }
+
+  static encryptString(text, password, salt = null, iterations = null) {
+    const result = rustCrypto.encryptString(
+      text,
+      password,
+      salt,
+      iterations
+    );
+    return {
+      encrypted: result.encrypted,
+      iv: result.iv,
+      salt: result.salt
+    };
+  }
+
+  static decryptString(encrypted, password, iv, salt, iterations = null) {
+    return rustCrypto.decryptString(
+      encrypted,
+      password,
+      iv,
+      salt,
+      iterations
+    );
+  }
+
+  static getVersion() {
+    return rustCrypto.getVersion();
+  }
+
+  static getConfig() {
+    return rustCrypto.getConfig();
   }
 }
+
+export { Crypto };
